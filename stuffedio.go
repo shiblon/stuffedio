@@ -1,7 +1,7 @@
 // Package stuffedio implements a straightforward self-synchronizing log using
 // consistent-overhead word stuffing (yes, COWS) as described in Paul Khuong's
 // https://www.pvk.ca/Blog/2021/01/11/stuff-your-logs/.
-package stuffedio
+package stuffedio // import entrogo.com/stuffedio
 
 import (
 	"bytes"
