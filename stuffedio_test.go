@@ -48,7 +48,7 @@ func Example() {
 	// "A message with delimiter \xfe\xfd in it"
 }
 
-func ExampleWriter_Append() {
+func ExampleWriter() {
 	buf := new(bytes.Buffer)
 
 	w := NewWriter(buf)
