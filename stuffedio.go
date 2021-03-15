@@ -44,7 +44,7 @@ func isDelimiter(b []byte, pos int) bool {
 	if pos > len(b)-len(reserved) {
 		return false
 	}
-	return bytes.Equal(b[pos:pos+len(reserved)], reserved[:])
+	return bytes.Equal(b[pos:pos+len(reserved)], reserved)
 }
 
 func findReserved(p []byte, end int) (int, bool) {
@@ -71,7 +71,7 @@ func (w *Writer) Append(p []byte) error {
 	}
 
 	// Always start with the delimiter.
-	buf := bytes.NewBuffer(reserved[:])
+	buf := bytes.NewBuffer(reserved)
 
 	// First block is small, try to find the reserved sequence in the first smallLimit bytes.
 	// Format that block as |reserved 0|reserved 1|length|actual bytes...|.
@@ -129,11 +129,12 @@ func (w *Writer) Append(p []byte) error {
 
 // Reader wraps an io.Reader and allows full records to be pulled at once.
 type Reader struct {
-	src   io.Reader
-	buf   []byte
-	pos   int  // position in the unused read buffer.
-	end   int  // one past the end of unused data.
-	ended bool // EOF reached, don't read again.
+	src      io.Reader
+	buf      []byte
+	consumed int  // number of bytes actually consumed by the decoder.
+	pos      int  // position in the unused read buffer.
+	end      int  // one past the end of unused data.
+	ended    bool // EOF reached, don't read again.
 }
 
 // NewReader creates a Reader from the given src, which is assumed to be
@@ -179,20 +180,42 @@ func (r *Reader) fillBuf() error {
 	return nil
 }
 
+// advance moves the pos pointer forward by n bytes.
+// Silently fails to move all the way if it encounters end first.
+func (r *Reader) advance(n int) {
+	r.pos += n
+	r.consumed += n
+}
+
+// bufLen indicates how many bytes are available in the buffer.
+func (r *Reader) bufLen() int {
+	return r.end - r.pos
+}
+
+// bufData returns a slice of the buffer contents in [pos, end).
+func (r *Reader) bufData() []byte {
+	return r.buf[r.pos:r.end]
+}
+
+// Consumed returns the number of bytes consumed from the underlying stream (not read, used).
+func (r *Reader) Consumed() int {
+	return r.consumed
+}
+
 // discardLeader advances the position of the buffer, only if it contains a leading delimiter.
 func (r *Reader) discardLeader() bool {
 	if r.end-r.pos < len(reserved) {
 		return false
 	}
-	if bytes.Equal(r.buf[r.pos:r.pos+len(reserved)], reserved[:]) {
-		r.pos += len(reserved)
+	if bytes.Equal(reserved, r.bufData()[:len(reserved)]) {
+		r.advance(len(reserved))
 		return true
 	}
 	return false
 }
 
 func (r *Reader) atDelimiter() bool {
-	return isDelimiter(r.buf[r.pos:r.end], 0)
+	return isDelimiter(r.bufData(), 0)
 }
 
 // Done indicates whether the underlying stream is exhausted and all records are returned.
@@ -205,23 +228,19 @@ func (r *Reader) Done() bool {
 // that the buffer is full enough to proceed before calling. It can only go up
 // to the penultimate byte, to ensure that it doesn't read half a delimiter.
 func (r *Reader) scanN(n int) []byte {
+	// Ensure that we don't go beyond the end of the buffer. The caller should
+	// never ask for more than this. But it can happen if, for example, the
+	// underlying stream is exhausted on a final block, with only the implicit
+	// delimiter.
+	if size := r.bufLen(); n > size {
+		n = size
+	}
 	start := r.pos
-	maxEnd := r.end
-	// Ensure that we don't go beyond the end of the buffer (minus 1). The
-	// caller should never ask for more than this. But it can happen if, for
-	// example, the underlying stream is exhausted on a final block, with only
-	// the implicit delimiter.
-	if have := maxEnd - r.pos; n > have {
-		n = have
-	}
-	if maxEnd > start+n {
-		maxEnd = start + n
-	}
-	for r.pos < maxEnd {
+	for i := 0; i < n; i++ {
 		if r.atDelimiter() {
 			break
 		}
-		r.pos++
+		r.advance(1)
 	}
 	return r.buf[start:r.pos]
 }
@@ -230,7 +249,7 @@ func (r *Reader) scanN(n int) []byte {
 // the buffer begins full. It may be filled again, in here.
 func (r *Reader) discardToDelimiter() error {
 	for !r.atDelimiter() && !r.Done() {
-		r.scanN(r.end - r.pos)
+		r.scanN(r.bufLen())
 		if err := r.fillBuf(); err != nil {
 			return fmt.Errorf("discard: %w", err)
 		}
@@ -293,7 +312,7 @@ func (r *Reader) Next() ([]byte, error) {
 	}
 	if smallSize != smallLimit {
 		// Implied delimiter in the data itself. Write the reserved word.
-		if _, err := buf.Write(reserved[:]); err != nil {
+		if _, err := buf.Write(reserved); err != nil {
 			return nil, fmt.Errorf("next: %w", err)
 		}
 	}
@@ -324,7 +343,7 @@ func (r *Reader) Next() ([]byte, error) {
 		}
 		if size != largeLimit {
 			// Implied delimiter in the data itself, append.
-			if _, err := buf.Write(reserved[:]); err != nil {
+			if _, err := buf.Write(reserved); err != nil {
 				return nil, fmt.Errorf("next: %w", err)
 			}
 		}
