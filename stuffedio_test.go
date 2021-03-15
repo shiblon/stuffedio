@@ -11,6 +11,43 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+func Example() {
+	buf := new(bytes.Buffer)
+
+	msgs := []string{
+		"A short message",
+		"A somewhat longer message",
+		"A message with delimiter \xfe\xfd in it",
+	}
+
+	// Write some things to the log.
+	w := NewWriter(buf)
+	for _, msg := range msgs {
+		if err := w.Append([]byte(msg)); err != nil {
+			log.Fatalf("Error appending: %v", err)
+		}
+	}
+
+	// Read the records from the log.
+	r := NewReader(buf)
+	for !r.Done() {
+		b, err := r.Next()
+		if err != nil {
+			if errors.Is(err, CorruptRecord) {
+				log.Printf("Error reading record, will skip: %v", err)
+				continue
+			}
+			log.Fatalf("Error reading: %v", err)
+		}
+		fmt.Printf("%q\n", string(b))
+	}
+
+	// Output:
+	// "A short message"
+	// "A somewhat longer message"
+	// "A message with delimiter \xfe\xfd in it"
+}
+
 func ExampleWriter_Append() {
 	buf := new(bytes.Buffer)
 
