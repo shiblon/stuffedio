@@ -338,8 +338,8 @@ func TestReader_Consumed(t *testing.T) {
 		{
 			name: "long-entries",
 			entries: []entry{
-				{517, strings.Repeat("0123456789abcdefg", 32)},
-				{16389, strings.Repeat("0123456789abcdefg", 1024)},
+				{517, strings.Repeat("0123456789abcdef", 32)},
+				{16389, strings.Repeat("0123456789abcdef", 1024)},
 			},
 		},
 	}
@@ -348,11 +348,9 @@ func TestReader_Consumed(t *testing.T) {
 		buf := new(bytes.Buffer)
 		w := NewWriter(buf)
 		for i, e := range test.entries {
-			//log.Printf("%q (%d): len=%d", test.name, i, len(e.val))
 			if err := w.Append([]byte(e.val)); err != nil {
 				t.Fatalf("Consumed %q (%d): Error appending: %v", test.name, i, err)
 			}
-			//log.Printf("%q", string(buf.Bytes()))
 		}
 
 		r := NewReader(buf)
@@ -365,8 +363,6 @@ func TestReader_Consumed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Consumed %q (%d): Unexpected error reading: %v", test.name, i, err)
 			}
-			//log.Printf("%q", string(b))
-			//log.Printf("test len %d", len(b))
 			if diff := cmp.Diff(test.entries[i].val, string(b)); diff != "" {
 				//log.Printf("want len %d, got len %d", len(test.entries[i].val), len(b))
 				t.Fatalf("Consumed %q (%d): Unexpected diff (-want +got):\n%v", test.name, i, diff)
