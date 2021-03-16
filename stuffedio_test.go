@@ -158,7 +158,22 @@ func TestWriter_Append_one(t *testing.T) {
 		{
 			name:  "exact-short-plus-delim",
 			write: strings.Repeat(c63, 4) + "\xfe\xfd",
-			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\x00\x00\x00\x00", // explicit *and* implicit delimiters added.
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\x00\x00\x00\x00", // explicit delimiter plus zero-length non-delimiter run.
+		},
+		{
+			name:  "exact-long-plus-delim",
+			write: strings.Repeat(c63, 4) + strings.Repeat(c63, 1016) + "\xfe\xfd",
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\xfc\xfc" + strings.Repeat(c63, 1016) + "\x00\x00\x00\x00",
+		},
+		{
+			name:  "exact-short-ends-with-delim",
+			write: strings.Repeat(c63, 4)[:250] + "\xfe\xfd",
+			raw:   "\xfe\xfd\xfa" + strings.Repeat(c63, 4)[:250] + "\x00\x00",
+		},
+		{
+			name:  "exact-long-ends-with-delim",
+			write: strings.Repeat(c63, 4) + strings.Repeat(c63, 1016)[:64006] + "\xfe\xfd",
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\xfa\xfc" + strings.Repeat(c63, 1016)[:64006] + "\x00\x00",
 		},
 		{
 			name:  "longer-message",

@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 )
 
 var (
@@ -380,10 +379,16 @@ func (r *Reader) Next() ([]byte, error) {
 		}
 	}
 
-	log.Printf("Full run: %v", fullRun)
-
-	// If the last block is full length, it won't have an implicit delimiter.
-	// Otherwise, it will. Remove it in that case.
+	// The last block is special, because if it is short, that does not imply
+	// that it ended with a delimiter inside it. It's just the end (and the
+	// next block starting will halt the scan).
+	// We remove implicit delimiters on final blocks that aren't full length,
+	// but we should *not* remove the implicit delimiter on blocks that *are*
+	// full length, because they never imply a delimiter in any case (full
+	// length == more is on the way).
+	//
+	// Thus, if the last block is full length, we don't trim off the last
+	// implicit delimiter bytes.
 	end := buf.Len()
 	if !fullRun {
 		end -= len(reserved)
