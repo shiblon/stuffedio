@@ -209,3 +209,13 @@ func (w *WALWriter) Append(index uint64, p []byte) error {
 func (w *WALWriter) NextIndex() uint64 {
 	return w.index + 1
 }
+
+// WAL returns a write-ahead log reader based on this stuffed log.
+func (r *Reader) WAL(opts ...WALReaderOption) *WALReader {
+	return NewWALReader(r, opts...)
+}
+
+// WAL returns a write-ahead log writer on top of a stuffed log.
+func (w *Writer) WAL(opts ...WALWriterOption) *WALWriter {
+	return NewWALWriter(w, opts...)
+}

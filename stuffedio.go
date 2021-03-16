@@ -1,7 +1,15 @@
 // Package stuffedio implements a straightforward self-synchronizing log using
 // consistent-overhead word stuffing (yes, COWS) as described in Paul Khuong's
 // https://www.pvk.ca/Blog/2021/01/11/stuff-your-logs/.
-package stuffedio // import entrogo.com/stuffedio
+//
+// This package contains a very simple stuffed-word Reader and Writer that can
+// be used to write delimited records into a log. It has no opinions about the
+// content of those records.
+//
+// It also contains a write-ahead log implementation, embodied in the WALReader
+// and WALWriter types. These can wrap stuffed readers and writers (or other
+// kinds of readers and writers if they satisfy the proper interface).
+package stuffedio // import "entrogo.com/stuffedio"
 
 import (
 	"bytes"

@@ -10,14 +10,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func Example_WAL() {
+func Example() {
 	buf := new(bytes.Buffer)
-	w := NewWALWriter(NewWriter(buf))
+	w := NewWriter(buf).WAL()
 
 	// Write messages.
 	msgs := []string{
 		"This is a message",
 		"This is another message",
+		"And here's a third",
 	}
 
 	for i, msg := range msgs {
@@ -27,7 +28,7 @@ func Example_WAL() {
 	}
 
 	// Now read them back.
-	r := NewWALReader(NewReader(buf))
+	r := NewReader(buf).WAL()
 	for !r.Done() {
 		idx, val, err := r.Next()
 		if err != nil {
@@ -39,6 +40,7 @@ func Example_WAL() {
 	// Output:
 	// 1: "This is a message"
 	// 2: "This is another message"
+	// 3: "And here's a third"
 }
 
 func TestWAL(t *testing.T) {
