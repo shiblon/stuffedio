@@ -257,6 +257,22 @@ func (r *Reader) discardToDelimiter() error {
 	return nil
 }
 
+// SkipPartial moves forward through the log until it finds a delimiter, if it
+// isn't already on one. Can be used, for example, to get shards started on a
+// record boundary without first getting a corruption error.
+func (r *Reader) SkipPartial() error {
+	if r.Done() {
+		return nil
+	}
+	if err := r.fillBuf(); err != nil {
+		return fmt.Errorf("skip partial: %w", err)
+	}
+	if err := r.discardToDelimiter(); err != nil {
+		return fmt.Errorf("skip partial: %w", err)
+	}
+	return nil
+}
+
 // Next returns the next record in the underying stream, or an error. It begins
 // by consuming the stream until it finds a delimiter (requiring each record to
 // start with one), so even if there was an error in a previous record, this

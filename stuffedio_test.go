@@ -77,6 +77,23 @@ func ExampleReader() {
 	// "hello"
 }
 
+func ExampleReader_SkipPartial() {
+	r := NewReader(bytes.NewBuffer([]byte("middle-of-record\xfe\xfd\x02AB")))
+	if err := r.SkipPartial(); err != nil {
+		log.Fatalf("Error skipping partial content: %v", err)
+	}
+	for !r.Done() {
+		b, err := r.Next()
+		if err != nil {
+			log.Fatalf("Error reading: %v", err)
+		}
+		fmt.Printf("%q\n", string(b))
+	}
+
+	// Output:
+	// "AB"
+}
+
 func TestWriter_Append_one(t *testing.T) {
 	cases := []struct {
 		name  string
