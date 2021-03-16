@@ -41,12 +41,18 @@ func WithInitialIndex(index uint64) WALReaderOption {
 	}
 }
 
-// NewWALReader creates a WALReader around the given bytes iterator: something
-// that provides Next and Done functions for obtaining byte string entries.
-func NewWALReader(iter RecordIterator) *WALReader {
-	return &WALReader{
+// NewWALReader creates a WALReader around the given record iterator, for
+// example, a Reader from this package.
+func NewWALReader(iter RecordIterator, opts ...WALReaderOption) *WALReader {
+	r := &WALReader{
 		src: iter,
 	}
+
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	return r
 }
 
 // unconditional read-ahead on the internal buffer.
@@ -138,8 +144,8 @@ func (r *WALReader) Done() bool {
 	return r.src.Done() && len(r.buf) == 0
 }
 
-// Appender is an interface for appending records to a stream.
-type Appender interface {
+// RecordAppender is an interface for appending records to a stream.
+type RecordAppender interface {
 	Append([]byte) error
 }
 
@@ -148,7 +154,7 @@ type Appender interface {
 // checksums data before stuffing it into the log, allowing a WALReader to
 // detect accidental corruption.
 type WALWriter struct {
-	dest  Appender
+	dest  RecordAppender
 	index uint64
 }
 
@@ -164,8 +170,9 @@ func WithPreviousIndex(idx uint64) WALWriterOption {
 	}
 }
 
-// NewWALWriter creates a WALWriter around the given io.Writer as its destination stream.
-func NewWALWriter(a Appender, opts ...WALWriterOption) *WALWriter {
+// NewWALWriter creates a WALWriter around the given record appender (for
+// example, a Writer from this package).
+func NewWALWriter(a RecordAppender, opts ...WALWriterOption) *WALWriter {
 	w := &WALWriter{
 		dest: a,
 	}
@@ -196,4 +203,9 @@ func (w *WALWriter) Append(index uint64, p []byte) error {
 		return fmt.Errorf("wal append: %w", err)
 	}
 	return nil
+}
+
+// NextIndex returns the next expected write index for this writer.
+func (w *WALWriter) NextIndex() uint64 {
+	return w.index + 1
 }
