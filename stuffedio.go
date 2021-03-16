@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 )
 
 var (
@@ -16,7 +17,7 @@ var (
 const (
 	radix      int = 0xfd
 	smallLimit int = 0xfc
-	largeLimit int = 0xfcfc
+	largeLimit int = radix*radix - 1
 )
 
 var (
@@ -300,6 +301,13 @@ func (r *Reader) Next() ([]byte, error) {
 		return nil, fmt.Errorf("next: no leading delimiter in record: %w", CorruptRecord)
 	}
 
+	// We keep track of whether we got a full run. We'll reset this to false in
+	// the beginning of the long loop (because more is coming), and set it
+	// again in the middle. If we end up all the way at the bottom with this
+	// set, the last read was a full run (exactly max length) and we should not
+	// remove the (implicitly added) delimiter at the end.
+	fullRun := false
+
 	// Read the first (small) section.
 	b := r.scanN(1)
 	if len(b) != 1 {
@@ -308,6 +316,9 @@ func (r *Reader) Next() ([]byte, error) {
 	smallSize := int(b[0])
 	if smallSize > smallLimit {
 		return nil, fmt.Errorf("next: short size header %d is too large: %w", smallSize, CorruptRecord)
+	}
+	if smallSize == smallLimit {
+		fullRun = true
 	}
 	// The size portion can't be part of a delimiter, because it would have
 	// triggered a "too big" error. Now we scan for delimiters while reading
@@ -335,6 +346,7 @@ func (r *Reader) Next() ([]byte, error) {
 
 	// Now we read zero or more large sections, stopping when we hit a delimiter or the end of the input stream.
 	for !r.atDelimiter() && !r.Done() {
+		fullRun = false
 		if err := r.fillBuf(); err != nil {
 			return nil, fmt.Errorf("next: %w", err)
 		}
@@ -349,6 +361,9 @@ func (r *Reader) Next() ([]byte, error) {
 		size := int(b[0]) + radix*int(b[1]) // little endian size, in radix base.
 		if size > largeLimit {
 			return nil, fmt.Errorf("next: large interior size %d: %w", size, CorruptRecord)
+		}
+		if size == largeLimit {
+			fullRun = true
 		}
 		b = r.scanN(size)
 		if len(b) != size {
@@ -365,7 +380,13 @@ func (r *Reader) Next() ([]byte, error) {
 		}
 	}
 
-	// Note: the last block will always have an extra delimiter appended to the
-	// end of it, so we have to not return that part.
-	return buf.Bytes()[:buf.Len()-len(reserved)], nil
+	log.Printf("Full run: %v", fullRun)
+
+	// If the last block is full length, it won't have an implicit delimiter.
+	// Otherwise, it will. Remove it in that case.
+	end := buf.Len()
+	if !fullRun {
+		end -= len(reserved)
+	}
+	return buf.Bytes()[:end], nil
 }

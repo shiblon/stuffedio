@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 )
+
+// 63 Characters, since 252 = 63 * 4.
+const c63 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
 func Example() {
 	buf := new(bytes.Buffer)
@@ -137,6 +141,26 @@ func TestWriter_Append_one(t *testing.T) {
 			raw:   "",
 		},
 		{
+			name:  "exact-short",
+			write: strings.Repeat(c63, 4), // 252
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4),
+		},
+		{
+			name:  "exactly-long-one",
+			write: strings.Repeat(c63, 4) + strings.Repeat(c63, 1016), // 252 + 64008
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\xfc\xfc" + strings.Repeat(c63, 1016),
+		},
+		{
+			name:  "exactly-long-two",
+			write: strings.Repeat(c63, 4) + strings.Repeat(c63, 1016) + strings.Repeat(c63, 1016), // 252 + 64008 + 64008
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\xfc\xfc" + strings.Repeat(c63, 1016) + "\xfc\xfc" + strings.Repeat(c63, 1016),
+		},
+		{
+			name:  "exact-short-plus-delim",
+			write: strings.Repeat(c63, 4) + "\xfe\xfd",
+			raw:   "\xfe\xfd\xfc" + strings.Repeat(c63, 4) + "\x00\x00\x00\x00", // explicit *and* implicit delimiters added.
+		},
+		{
 			name:  "longer-message",
 			write: "This is a much longer message, containing many more characters than can fit into a single short message of 252 characters. It kind of rambles on, as a result. Good luck figuring out where the break needs to be! It turns out that 252 bytes is really quite a lot of text for a short test like this.",
 			raw:   "\xfe\xfd\xfcThis is a much longer message, containing many more characters than can fit into a single short message of 252 characters. It kind of rambles on, as a result. Good luck figuring out where the break needs to be! It turns out that 252 bytes is really qui\x2c\x00te a lot of text for a short test like this.",
@@ -151,6 +175,11 @@ func TestWriter_Append_one(t *testing.T) {
 			write: "This is a much longer message, containing many more characters than can fit into a single short message of 252 characters. It kind of rambles on, as a result. Good luck figuring out where the break needs to be! It turns out that 252 bytes is really qu\xfe\xfdite a lot of text for a short test like this.\xfe\xfd",
 			raw:   "\xfe\xfd\xfcThis is a much longer message, containing many more characters than can fit into a single short message of 252 characters. It kind of rambles on, as a result. Good luck figuring out where the break needs to be! It turns out that 252 bytes is really qu\xfe\x2e\x00\xfdite a lot of text for a short test like this.\x00\x00",
 		},
+		{
+			name:  "really-long-message",
+			write: strings.Repeat("a", 252) + strings.Repeat("b", 64008) + strings.Repeat("c", 1024),
+			raw:   "\xfe\xfd\xfc" + strings.Repeat("a", 252) + "\xfc\xfc" + strings.Repeat("b", 64008) + "\x0c\x04" + strings.Repeat("c", 1024),
+		},
 	}
 
 	for _, test := range cases {
@@ -159,8 +188,8 @@ func TestWriter_Append_one(t *testing.T) {
 		if err := w.Append([]byte(test.write)); err != nil {
 			t.Fatalf("Append_one %q: writing: %v", test.name, err)
 		}
-		if want, got := []byte(test.raw), buf.Bytes(); !bytes.Equal(want, got) {
-			t.Fatalf("Append_one %q: want raw %q, got %q", test.name, string(want), string(got))
+		if diff := cmp.Diff(test.raw, string(buf.Bytes())); diff != "" {
+			t.Fatalf("Append_one %q: unexpected diff (-want +got):\n%v", test.name, diff)
 		}
 		r := NewReader(buf)
 		b, err := r.Next()
@@ -264,6 +293,73 @@ func TestReader_Next_corrupt(t *testing.T) {
 			if diff := cmp.Diff(string(b), want); diff != "" {
 				t.Errorf("Next_corrupt %q: unexpected diff in record %d:\n%v", test.name, i, diff)
 			}
+		}
+	}
+}
+
+func TestReader_Consumed(t *testing.T) {
+	type entry struct {
+		rawLen int
+		val    string
+	}
+
+	cases := []struct {
+		name    string
+		entries []entry
+	}{
+		{
+			name: "basic",
+			entries: []entry{
+				{8, "Hello"},
+				{8, "There"},
+			},
+		},
+		{
+			name: "full short",
+			entries: []entry{
+				{255, strings.Repeat(c63, 4)},
+			},
+		},
+		{
+			name: "long-entries",
+			entries: []entry{
+				{517, strings.Repeat("0123456789abcdefg", 32)},
+				{16389, strings.Repeat("0123456789abcdefg", 1024)},
+			},
+		},
+	}
+
+	for _, test := range cases {
+		buf := new(bytes.Buffer)
+		w := NewWriter(buf)
+		for i, e := range test.entries {
+			//log.Printf("%q (%d): len=%d", test.name, i, len(e.val))
+			if err := w.Append([]byte(e.val)); err != nil {
+				t.Fatalf("Consumed %q (%d): Error appending: %v", test.name, i, err)
+			}
+			//log.Printf("%q", string(buf.Bytes()))
+		}
+
+		r := NewReader(buf)
+		if r.Consumed() != 0 {
+			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, r.Consumed())
+		}
+		totalConsumed := 0
+		for i := 0; i < len(test.entries) && !r.Done(); i++ {
+			b, err := r.Next()
+			if err != nil {
+				t.Fatalf("Consumed %q (%d): Unexpected error reading: %v", test.name, i, err)
+			}
+			//log.Printf("%q", string(b))
+			//log.Printf("test len %d", len(b))
+			if diff := cmp.Diff(test.entries[i].val, string(b)); diff != "" {
+				//log.Printf("want len %d, got len %d", len(test.entries[i].val), len(b))
+				t.Fatalf("Consumed %q (%d): Unexpected diff (-want +got):\n%v", test.name, i, diff)
+			}
+			if want, got := totalConsumed+test.entries[i].rawLen, r.Consumed(); want != got {
+				t.Fatalf("Consumed %q (%d): Wanted %d consumed, got %d", test.name, i, want, got)
+			}
+			totalConsumed = r.Consumed()
 		}
 	}
 }
