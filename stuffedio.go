@@ -22,8 +22,8 @@
 //   if err != nil {
 //     log.Fatalf("Error opening: %v", err)
 //   }
-//   defer f.Close()
 //   w := NewWriter(f)
+//   defer w.Close()
 //
 //   msgs := []string{
 //     "msg 1",
@@ -43,8 +43,8 @@
 //   if err != nil {
 //     log.Fatalf("Error opening: %v", err)
 //   }
-//   defer f.Close()
 //   r := NewReader(f)
+//   defer r.Close()
 //
 //   for !r.Done() {
 //     b, err := r.Next()
@@ -146,14 +146,61 @@
 //
 // Indices must be in sequence, with the exception of repeats.
 //
-// An example of how this works is in the code package-level documentation
-// below.
+// An example of how this works is below:
+//
+//	buf := new(bytes.Buffer)
+//	w := NewWriter(buf).WAL()
+//
+//	// Write messages.
+//	msgs := []string{
+//		"This is a message",
+//		"This is another message",
+//		"And here's a third",
+//	}
+//
+//	for i, msg := range msgs {
+//		if err := w.Append(uint64(i)+1, []byte(msg)); err != nil {
+//			log.Fatalf("Append error: %v", err)
+//		}
+//	}
+//
+//	// Now read them back.
+//	r := NewReader(buf).WAL()
+//	defer r.Close()
+//	for !r.Done() {
+//		idx, val, err := r.Next()
+//		if err != nil {
+//			log.Fatalf("Read error: %v", err)
+//		}
+//		fmt.Printf("%d: %q\n", idx, string(val))
+//	}
+//
+//	// Output:
+//	// 1: "This is a message"
+//	// 2: "This is another message"
+//	// 3: "And here's a third"
+//
+// MultiReader
+//
+// If you wish to implement, say, a write-ahead log over multiple ordered
+// readers (effectively concatenating them), there is a MultiReader
+// implementation contained here. There is also a handy file iterator that can
+// be used to provide on-demand file opening for the MultiReader.
+//
+// The files themselves are packages into simple Reader types, and then the
+// WALReader can be used on top of that, preserving all of the WAL logic over
+// top of a concatenated set of stuffed readers.
+//
+// This is implemented for you in the WALDirReader type, which can look into a
+// directory for files with names patterned after "journal-%16x", order them
+// lexicographically, then treat them as basically a single file.
 package stuffedio // import "entrogo.com/stuffedio"
 
 import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 )
 
 var (
@@ -270,6 +317,14 @@ func (w *Writer) Append(p []byte) error {
 	}
 	if _, err := io.Copy(w.dest, buf); err != nil {
 		return fmt.Errorf("write rec: %w", err)
+	}
+	return nil
+}
+
+// Close cleans up the underlying streams. If the underlying stream is also an io.Closer, it will close it.
+func (w *Writer) Close() error {
+	if c, ok := w.dest.(io.Closer); ok {
+		return c.Close()
 	}
 	return nil
 }
@@ -541,4 +596,150 @@ func (r *Reader) Next() ([]byte, error) {
 		end -= len(reserved)
 	}
 	return buf.Bytes()[:end], nil
+}
+
+// ReaderIterator is an iterator over Readers, for use with the MultiReader.
+type ReaderIterator interface {
+	Next() (*Reader, error)
+	Done() bool
+}
+
+// MultiReader wraps multiple readers, either specified directly or through a
+// reader iterator interface that can produce them on demanad. This is useful
+// when concatenating multiple file shards together as a single record store.
+type MultiReader struct {
+	readers    []*Reader
+	nextReader int
+
+	readerIter ReaderIterator
+
+	reader *Reader
+}
+
+// NewMultiReader creates a MultiReader from a slice of readers. These are
+// ordered, and will be consumed in the order given.
+func NewMultiReader(readers []*Reader) *MultiReader {
+	return &MultiReader{
+		readers: readers,
+	}
+}
+
+// NewMultiReaderFunc creates a MultiReader where each reader is requested, one
+// at a time, through the given reader-returning function. The function is
+// expected to return a nil Reader if there are no more readers.
+func NewMultiReaderIter(ri ReaderIterator) *MultiReader {
+	return &MultiReader{
+		readerIter: ri,
+	}
+}
+
+// WAL produces a write-ahead log over top of this multi reader.
+func (r *MultiReader) WAL() *WALReader {
+	return NewWALReader(r)
+}
+
+// ensureReader makes sure that there is a current reader available that isn't
+// exhausted, if possible.
+func (r *MultiReader) ensureReader() error {
+	// Current and not exhausted.
+	if r.reader != nil && !r.reader.Done() {
+		return nil
+	}
+	// If we get here, the reader is either nil or finished. Create a new one.
+
+	// Try the function.
+	if r.readerIter != nil && !r.readerIter.Done() {
+		var err error
+		if r.reader, err = r.readerIter.Next(); err != nil {
+			return fmt.Errorf("ensure reader: %w", err)
+		}
+		return nil
+	}
+
+	// Try the list.
+	if r.nextReader >= len(r.readers) {
+		return io.EOF
+	}
+	r.reader = r.readers[r.nextReader]
+	r.nextReader++
+	return nil
+}
+
+// Next gets the next record for these readers.
+func (r *MultiReader) Next() ([]byte, error) {
+	if err := r.ensureReader(); err != nil {
+		return nil, fmt.Errorf("multi next: %w", err)
+	}
+	return r.reader.Next()
+}
+
+// Done returns whether this multi reader has exhausted all underlying readers.
+func (r *MultiReader) Done() bool {
+	if r.readerIter == nil && len(r.readers) == 0 {
+		return true
+	}
+	// Current reader, not exhausted.
+	if r.reader != nil && !r.reader.Done() {
+		return false
+	}
+	// Not finished with the list.
+	if r.nextReader < len(r.readers) {
+		return false
+	}
+	// Not finished with the reader iterator.
+	if r.readerIter != nil && !r.readerIter.Done() {
+		return false
+	}
+	return true
+}
+
+// FilesReaderIterator is an iterator over readers based on a list of file names.
+type FilesReaderIterator struct {
+	fsys     fs.FS
+	names    []string
+	file     io.ReadCloser
+	nextName int
+}
+
+// NewFilesReaderIterator creates a new iterator from a list of file names.
+func NewFilesReaderIterator(fsys fs.FS, names []string) *FilesReaderIterator {
+	return &FilesReaderIterator{
+		names: names,
+		fsys:  fsys,
+	}
+}
+
+// Next returns a new reader if possible, or io.EOF.
+func (r *FilesReaderIterator) Next() (*Reader, error) {
+	if r.Done() {
+		return nil, io.EOF
+	}
+	defer func() {
+		r.nextName++
+	}()
+
+	if r.file != nil {
+		r.file.Close()
+	}
+
+	f, err := r.fsys.Open(r.names[r.nextName])
+	if err != nil {
+		return nil, fmt.Errorf("next reader file: %w", err)
+	}
+	r.file = f
+	return NewReader(f), nil
+}
+
+// Done returns true iff there are no more readers to produce.
+func (r *FilesReaderIterator) Done() bool {
+	return r.nextName >= len(r.names)
+}
+
+// Close closes the last file, if there is one open, and makes this return io.EOF ever after.
+func (r *FilesReaderIterator) Close() error {
+	r.nextName = len(r.names)
+	if r.file != nil {
+		return r.file.Close()
+	}
+	return nil
 }

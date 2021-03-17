@@ -10,7 +10,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func Example() {
+func ExampleReadWrite() {
 	buf := new(bytes.Buffer)
 	w := NewWriter(buf).WAL()
 
@@ -52,7 +52,7 @@ func TestWAL(t *testing.T) {
 		name             string
 		entries          []entry
 		randomlyCorrupt  int
-		writePrevIndex   uint64
+		writeFirstIndex  uint64
 		readInitialIndex uint64
 		writeError       bool
 		readError        bool
@@ -72,7 +72,8 @@ func TestWAL(t *testing.T) {
 				{4, "Two message"},
 				{5, "Three message"},
 			},
-			writeError: true,
+			writeError:      true,
+			writeFirstIndex: 1,
 		},
 		{
 			name: "start-late-set-write-index",
@@ -81,7 +82,7 @@ func TestWAL(t *testing.T) {
 				{4, "Two message"},
 				{5, "Three message"},
 			},
-			writePrevIndex: 2,
+			writeFirstIndex: 3,
 		},
 		{
 			name: "start-late-set-write-read-index",
@@ -90,7 +91,7 @@ func TestWAL(t *testing.T) {
 				{4, "Two message"},
 				{5, "Three message"},
 			},
-			writePrevIndex:   2,
+			writeFirstIndex:  3,
 			readInitialIndex: 3,
 		},
 		{
@@ -100,7 +101,7 @@ func TestWAL(t *testing.T) {
 				{4, "Two message"},
 				{5, "Three message"},
 			},
-			writePrevIndex:   2,
+			writeFirstIndex:  3,
 			readInitialIndex: 5,
 			readError:        true,
 		},
@@ -130,7 +131,7 @@ func TestWAL(t *testing.T) {
 		buf := new(bytes.Buffer)
 
 		// Test writes.
-		w := NewWALWriter(NewWriter(buf), WithPreviousIndex(test.writePrevIndex))
+		w := NewWALWriter(NewWriter(buf), WithFirstIndex(test.writeFirstIndex))
 
 		var writeErr error
 		for _, entry := range test.entries {
@@ -163,7 +164,7 @@ func TestWAL(t *testing.T) {
 		}
 
 		// Test reads.
-		r := NewWALReader(NewReader(buf), WithInitialIndex(test.readInitialIndex))
+		r := NewWALReader(NewReader(buf), ExpectFirstIndex(test.readInitialIndex))
 
 		entryIdx := 0
 		var readErr error

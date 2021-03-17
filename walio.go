@@ -32,10 +32,10 @@ type WALReader struct {
 // WALReaderOption defines options for write-ahead log readers.
 type WALReaderOption func(w *WALReader)
 
-// WithInitialIndex sets the expected initial index for this reader. A value of
+// ExpectFirstIndex sets the expected initial index for this reader. A value of
 // zero (the default) indicates that any initial value is allowed, which
 // reduces its ability to check that you are reading from the expected file.
-func WithInitialIndex(index uint64) WALReaderOption {
+func ExpectFirstIndex(index uint64) WALReaderOption {
 	return func(r *WALReader) {
 		r.nextIndex = index
 	}
@@ -144,35 +144,45 @@ func (r *WALReader) Done() bool {
 	return r.src.Done() && len(r.buf) == 0
 }
 
-// RecordAppender is an interface for appending records to a stream.
-type RecordAppender interface {
+// Close closes underlying implementations if they are io.Closers.
+func (r *WALReader) Close() error {
+	r.buf = nil
+	if c, ok := r.src.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// AppendCloser is an interface for appending records to a stream.
+type AppendCloser interface {
+	io.Closer
 	Append([]byte) error
 }
 
-// WALWriter implements a write-ahead log around an io.Writer. It requires
-// every appended entry to have an incremeented index specified, and it
-// checksums data before stuffing it into the log, allowing a WALReader to
-// detect accidental corruption.
+// WALWriter implements a write-ahead log around an AppendCloser (like a
+// Writer from this package). It requires every appended entry to have an
+// incremented index specified, and it checksums data before stuffing it into
+// the log, allowing a WALReader to detect accidental corruption.
 type WALWriter struct {
-	dest  RecordAppender
-	index uint64
+	dest      AppendCloser
+	nextIndex uint64
 }
 
 // WALWriterOption specifies options for the write-ahead log writer.
 type WALWriterOption func(*WALWriter)
 
-// WithPreviousIndex sets the "previous" index for this writer. Use this to
-// start appending to an existing log at the proper index (which must be the
-// next one). Default is 0, indicating that the first index to be appended is 1.
-func WithPreviousIndex(idx uint64) WALWriterOption {
+// WithFirstIndex sets the first index for this writer. Use this to start
+// appending to an existing log at the proper index (which must be the next
+// one). Default is 0, indicating that any first index will work.
+func WithFirstIndex(idx uint64) WALWriterOption {
 	return func(w *WALWriter) {
-		w.index = idx
+		w.nextIndex = idx
 	}
 }
 
 // NewWALWriter creates a WALWriter around the given record appender (for
 // example, a Writer from this package).
-func NewWALWriter(a RecordAppender, opts ...WALWriterOption) *WALWriter {
+func NewWALWriter(a AppendCloser, opts ...WALWriterOption) *WALWriter {
 	w := &WALWriter{
 		dest: a,
 	}
@@ -188,10 +198,10 @@ func (w *WALWriter) Append(index uint64, p []byte) error {
 	if index == 0 {
 		return fmt.Errorf("index 0 is invalid as a starting index for a write-ahead log")
 	}
-	if index != w.index+1 {
-		return fmt.Errorf("expected next index in sequence %d, got %d", w.index+1, index)
+	if w.nextIndex != 0 && index != w.nextIndex {
+		return fmt.Errorf("expected next index in sequence %d, got %d", w.nextIndex, index)
 	}
-	w.index = index
+	w.nextIndex = index + 1
 
 	crc := crc32.Checksum(p, CRCTable)
 	entry := make([]byte, len(p)+12)
@@ -205,9 +215,14 @@ func (w *WALWriter) Append(index uint64, p []byte) error {
 	return nil
 }
 
+// Close closes underlying implementations if they are io.Closers.
+func (w *WALWriter) Close() error {
+	return w.dest.Close()
+}
+
 // NextIndex returns the next expected write index for this writer.
 func (w *WALWriter) NextIndex() uint64 {
-	return w.index + 1
+	return w.nextIndex
 }
 
 // WAL returns a write-ahead log reader based on this stuffed log.
