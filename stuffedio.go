@@ -2,13 +2,152 @@
 // consistent-overhead word stuffing (yes, COWS) as described in Paul Khuong's
 // https://www.pvk.ca/Blog/2021/01/11/stuff-your-logs/.
 //
+// Stuffed Logs
+//
 // This package contains a very simple stuffed-word Reader and Writer that can
 // be used to write delimited records into a log. It has no opinions about the
 // content of those records.
 //
-// It also contains a write-ahead log implementation, embodied in the WALReader
+// Thus, you can write arbitrary bytes to a Writer and it will delimit them
+// appropriately, and in a way that---by construction---guarantees that the
+// delimiter will not appear anywhere in the record. This makes it a
+// self-synchronizing file format: you can always find the next record by
+// searching for the delimiter.
+//
+// Using the Reader/Writer interface, of course, does not require understanding
+// what it is doing underneath. If you want to write to a file, you can simply
+// open it for appending and wrap it in a Writer:
+//
+//   f, err := os.OpenFile(mypath, os.RDWR|os.CREATE|os.APPEND, 0755)
+//   if err != nil {
+//     log.Fatalf("Error opening: %v", err)
+//   }
+//   defer f.Close()
+//   w := NewWriter(f)
+//
+//   msgs := []string{
+//     "msg 1",
+//     "msg 2",
+//     "msg 3",
+//   }
+//
+//   for _, msg := range msgs {
+//     if err := w.Append(msg); err != nil {
+//       log.Fatalf("Error appending: %v", err)
+//     }
+//   }
+//
+// Reading from an existing log is similarly simple:
+//
+//   f, err := os.Open(mypath)
+//   if err != nil {
+//     log.Fatalf("Error opening: %v", err)
+//   }
+//   defer f.Close()
+//   r := NewReader(f)
+//
+//   for !r.Done() {
+//     b, err := r.Next()
+//     if err != nil {
+//       log.Fatalf("Error reading: %v", err)
+//     }
+//     fmt.Println(string(b))
+//   }
+//
+// Sharded Parallel Reads
+//
+// The interfaces here are explicitly designed to allow many of the use cases
+// outlined in the article above, including direct support of parallel sharded
+// reads.
+//
+// To manage sharded reads, you might structure code something like this.
+//
+//   func processShard(r io.Reader, nominalLength int) error {
+//     r := NewReader(r)
+//     // If we're in the middle of a record, skip to the next full one.
+//     if err := r.SkipPartial(); err != nil {
+//       return fmt.Errorf("process shard skip: %w", err)
+//     }
+//     // Read until finished or until we exceed the shard length.
+//     // The final record inside the shard is likely going to extend
+//     // past the length a little, which is fine.
+//     for !r.Done() && r.Consumed() < nominalLength {
+//       b, err := r.Next()
+//       if err != nil {
+//         return fmt.Errorf("process shard next: %w", err)
+//       }
+//       // PROCESS b HERE
+//     }
+//   }
+//
+//   func main() {
+//     const (
+//       path = "/path/to/log"
+//       shards = 2
+//     )
+//     stat, err := os.Stat(path)
+//     if err != nil {
+//       log.Fatalf("Can't stat %q: %v", path, err)
+//     }
+//     shardSize := stat.Size() / shards
+//
+//     g, ctx := errgroup.WithContext(context.Background())
+//
+//     for i := 0; i < shards; i++ {
+//       i := i // local for use in closures.
+//       g.Go(func() error {
+//         f, err := os.Open(path)
+//         if err != nil {
+//           return fmt.Errorf("open: %w", err)
+//         }
+//         seekPos := i*shardLength
+//         if _, err := f.Seek(seekPos, os.SEEK_SET); err != nil {
+//           return fmt.Errorf("seek: %w", err)
+//         }
+//         size := shardLength
+//         if i == shards-1 {
+//           size := stat.Size - seekPos
+//         }
+//         processShard(f, size)
+//       })
+//     }
+//
+//     if err := g.Wait(); err != nil {
+//       log.Fatal(err)
+//     }
+//   }
+//
+// The key idea in the above code is that the Consumed method returns how many
+// actual underlying bytes have contributed to record output thus far. When
+// more than the shard length has been consumed, that shard is finished. Simply
+// opening the file multiple times for reading and seeking provides the
+// appropriate io.Reader interface for each shard.
+//
+// Write-Ahead Logs
+//
+// The package also contains a write-ahead log implementation, embodied in the WALReader
 // and WALWriter types. These can wrap stuffed readers and writers (or other
 // kinds of readers and writers if they satisfy the proper interface).
+//
+// They are, like the simpler Reader/Writer types, straightforward to use.
+// However, they require an index (ordinal) to be passed for each entry when
+// writing, and these indices are returned when reading.
+//
+// Additionally, each record has a checksum associated with it, and during
+// reads, those checksums are checked.
+//
+// Repeated indices are allowed, with only the first valid record for that
+// indicdes being returned on read.
+//
+// The first record's index must be 1 or higher. Options allow a specific
+// starting index to be enforced (e.g., when the file name indicates the
+// starting point of the log, one can specify that starting point when reading
+// and receive an error if it is long).
+//
+// Indices must be in sequence, with the exception of repeats.
+//
+// An example of how this works is in the code package-level documentation
+// below.
 package stuffedio // import "entrogo.com/stuffedio"
 
 import (
