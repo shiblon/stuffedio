@@ -201,6 +201,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 )
 
 var (
@@ -425,6 +426,14 @@ func (r *Reader) Done() bool {
 	return r.end == r.pos && r.ended
 }
 
+// Close closes the underlying stream, if it happens to implement io.Closer.
+func (r *Reader) Close() error {
+	if c, ok := r.src.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 // scanN returns at most the next n bytes, fewer if it hits the end or a delimiter.
 // It conumes them from the buffer. It does not read from the source: ensure
 // that the buffer is full enough to proceed before calling. It can only go up
@@ -600,6 +609,8 @@ func (r *Reader) Next() ([]byte, error) {
 
 // ReaderIterator is an iterator over Readers, for use with the MultiReader.
 type ReaderIterator interface {
+	io.Closer
+
 	Next() (*Reader, error)
 	Done() bool
 }
@@ -609,8 +620,6 @@ type ReaderIterator interface {
 // when concatenating multiple file shards together as a single record store.
 type MultiReader struct {
 	readers    []*Reader
-	nextReader int
-
 	readerIter ReaderIterator
 
 	reader *Reader
@@ -642,8 +651,13 @@ func (r *MultiReader) WAL() *WALReader {
 // exhausted, if possible.
 func (r *MultiReader) ensureReader() error {
 	// Current and not exhausted.
-	if r.reader != nil && !r.reader.Done() {
-		return nil
+	if r.reader != nil {
+		if !r.reader.Done() {
+			return nil
+		}
+		// Exhausted, close it.
+		r.reader.Close()
+		r.reader = nil
 	}
 	// If we get here, the reader is either nil or finished. Create a new one.
 
@@ -657,11 +671,11 @@ func (r *MultiReader) ensureReader() error {
 	}
 
 	// Try the list.
-	if r.nextReader >= len(r.readers) {
+	if len(r.readers) == 0 {
 		return io.EOF
 	}
-	r.reader = r.readers[r.nextReader]
-	r.nextReader++
+	r.reader = r.readers[0]
+	r.readers = r.readers[1:]
 	return nil
 }
 
@@ -683,7 +697,7 @@ func (r *MultiReader) Done() bool {
 		return false
 	}
 	// Not finished with the list.
-	if r.nextReader < len(r.readers) {
+	if len(r.readers) != 0 {
 		return false
 	}
 	// Not finished with the reader iterator.
@@ -691,6 +705,34 @@ func (r *MultiReader) Done() bool {
 		return false
 	}
 	return true
+}
+
+// Close closes the currently busy underlying reader and reader iterator, if any.
+func (r *MultiReader) Close() error {
+	defer func() {
+		r.reader = nil
+		r.readers = nil
+		r.readerIter = nil
+	}()
+
+	var msgs []string
+	if err := r.readerIter.Close(); err != nil {
+		msgs = append(msgs, err.Error())
+	}
+	if err := r.reader.Close(); err != nil {
+		msgs = append(msgs, err.Error())
+	}
+	for _, reader := range r.readers {
+		if err := reader.Close(); err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
+
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("wal dir close: %v", strings.Join(msgs, " :: "))
 }
 
 // FilesReaderIterator is an iterator over readers based on a list of file names.

@@ -19,7 +19,6 @@ var (
 // WALDirReader is a write-ahead log reader that works over specifically-named files in a directory.
 type WALDirReader struct {
 	fsys       fs.FS
-	readerIter *FilesReaderIterator
 	readerImpl *WALReader
 }
 
@@ -38,12 +37,9 @@ func NewWALDirReader(fsys fs.FS) (*WALDirReader, error) {
 		return nil, fmt.Errorf("open wal dir: no journal files found")
 	}
 
-	rIter := NewFilesReaderIterator(fsys, names)
-
 	return &WALDirReader{
 		fsys:       fsys,
-		readerIter: rIter,
-		readerImpl: NewMultiReaderIter(rIter).WAL(),
+		readerImpl: NewMultiReaderIter(NewFilesReaderIterator(fsys, names)).WAL(),
 	}, nil
 }
 
@@ -62,7 +58,7 @@ func (w *WALDirReader) Done() bool {
 
 // Close closes any open files and invalidates this, causing to always return EOF.
 func (w *WALDirReader) Close() error {
-	return w.readerIter.Close()
+	return w.readerImpl.Close()
 }
 
 // FilesWithPrefix finds files in the given file system
