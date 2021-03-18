@@ -406,7 +406,58 @@ func TestReverseUnstuffer(t *testing.T) {
 		}
 
 		if diff := cmp.Diff(test.want, got); diff != "" {
-			t.Fatalf("ReverseUnstuffer %q: unexpected diff (-want +got):\n%v", test.name, diff)
+			t.Errorf("ReverseUnstuffer %q: unexpected diff (-want +got):\n%v", test.name, diff)
+		}
+	}
+}
+
+func TestReverseUnstuffer_LongEntries(t *testing.T) {
+	cases := []struct {
+		name string
+		msgs []string // we always want them in reverse
+	}{
+		{
+			name: "one-long-record",
+			msgs: []string{strings.Repeat("a", 100000)},
+		},
+		{
+			name: "two-long-records",
+			msgs: []string{
+				strings.Repeat("a", 100000),
+				strings.Repeat("b", 100000),
+			},
+		},
+		{
+			name: "two-long-one-short",
+			msgs: []string{
+				strings.Repeat("a", 100000),
+				strings.Repeat("b", 200),
+				strings.Repeat("c", 100000),
+			},
+		},
+	}
+
+	for _, test := range cases {
+		buf := new(bytes.Buffer)
+		s := NewStuffer(buf)
+		for _, msg := range test.msgs {
+			if err := s.Append([]byte(msg)); err != nil {
+				t.Fatalf("ReverseUnstuffer long entries %q append: %v", test.name, err)
+			}
+		}
+
+		u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		var reverseGot []string
+		for !u.Done() {
+			b, err := u.Next()
+			if err != nil {
+				t.Fatalf("ReverseUnstuffer long entries %q next: %v", test.name, err)
+			}
+			reverseGot = append([]string{string(b)}, reverseGot...)
+		}
+
+		if diff := cmp.Diff(test.msgs, reverseGot); diff != "" {
+			t.Errorf("ReverseUnstuffer long entries %q unexpected diff (-want +reverseGot):\n%v", test.name, diff)
 		}
 	}
 }
