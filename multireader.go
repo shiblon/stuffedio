@@ -4,13 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"regexp"
-	"strconv"
 	"strings"
-)
-
-var (
-	indexPattern = regexp.MustCompile(`^(.+)-([a-fA-F0-9]+)$`)
 )
 
 // UnstufferIterator is an iterator over Unstuffers, for use with the MultiUnstuffer.
@@ -185,23 +179,4 @@ func (r *FilesUnstufferIterator) Close() error {
 		return r.file.Close()
 	}
 	return nil
-}
-
-// IndexName returns a string for the given index value.
-func IndexName(prefix string, idx uint64) string {
-	return fmt.Sprintf("%s-%016x", prefix, idx)
-}
-
-// ParseIndexName pulls the index from a file name. Should not have path components.
-func ParseIndexName(name string) (prefix string, index uint64, err error) {
-	groups := indexPattern.FindStringSubmatch(name)
-	if len(groups) == 0 {
-		return "", 0, fmt.Errorf("parse name: no match for %q", name)
-	}
-	prefix, idxStr := groups[0], groups[1]
-	idx, err := strconv.ParseUint(idxStr, 16, 64)
-	if err != nil {
-		return "", 0, fmt.Errorf("parse name: %w", err)
-	}
-	return prefix, idx, nil
 }

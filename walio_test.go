@@ -191,3 +191,46 @@ func TestWAL(t *testing.T) {
 		}
 	}
 }
+
+func TestWAL_descending(t *testing.T) {
+	cases := []struct {
+		name string
+		vals []string
+	}{
+		{
+			name: "just-some-vals",
+			vals: []string{
+				"Message 1",
+				"Message 2",
+				"Mesasge 3",
+			},
+		},
+	}
+
+	for _, test := range cases {
+		buf := new(bytes.Buffer)
+
+		s := NewStuffer(buf).WAL()
+		for i, val := range test.vals {
+			if err := s.Append(uint64(i+1), []byte(val)); err != nil {
+				t.Fatalf("WAL descending %q append: %v", test.name, err)
+			}
+		}
+
+		u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len())).WAL()
+		nextIdx := uint64(len(test.vals))
+		for !u.Done() {
+			i, b, err := u.Next()
+			if err != nil {
+				t.Fatalf("WAL descending %q next: %v", test.name, err)
+			}
+			if i != nextIdx {
+				t.Fatalf("WAL descending %q: want index %d, got %d", test.name, nextIdx, i)
+			}
+			if string(b) != test.vals[i-1] {
+				t.Fatalf("WAL descending %q: want val %q, got %q", test.name, test.vals[i-1], b)
+			}
+			nextIdx--
+		}
+	}
+}

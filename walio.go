@@ -24,9 +24,10 @@ type RecordIterator interface {
 // index and checksum) where possibly only the last is not corrupt, and it
 // knows that record indices should be both compact and monotonic.
 type WALUnstuffer struct {
-	src       RecordIterator
-	buf       []byte
-	nextIndex uint64
+	src        RecordIterator
+	buf        []byte
+	nextIndex  uint64
+	descending bool
 }
 
 // WALUnstufferOption defines options for write-ahead log readers.
@@ -38,6 +39,14 @@ type WALUnstufferOption func(w *WALUnstuffer)
 func ExpectFirstIndex(index uint64) WALUnstufferOption {
 	return func(r *WALUnstuffer) {
 		r.nextIndex = index
+	}
+}
+
+// ExpectDescending tells the unstuffer to expect indices to be in strictly
+// descending order, rather than ascending.
+func ExpectDescending() WALUnstufferOption {
+	return func(r *WALUnstuffer) {
+		r.descending = true
 	}
 }
 
@@ -83,7 +92,11 @@ func (r *WALUnstuffer) Next() (uint64, []byte, error) {
 		return 0, nil, io.EOF
 	}
 	defer func() {
-		r.nextIndex++
+		if r.descending {
+			r.nextIndex--
+		} else {
+			r.nextIndex++
+		}
 	}()
 	var result struct {
 		val []byte
@@ -237,5 +250,11 @@ func (w *Stuffer) WAL(opts ...WALStufferOption) *WALStuffer {
 
 // WAL produces a write-ahead log over top of this multi reader.
 func (r *MultiUnstuffer) WAL(opts ...WALUnstufferOption) *WALUnstuffer {
+	return NewWALUnstuffer(r, opts...)
+}
+
+// WAL produces a write-ahead log over a reversed unstuffer.
+func (r *ReverseUnstuffer) WAL(opts ...WALUnstufferOption) *WALUnstuffer {
+	opts = append(opts, ExpectDescending())
 	return NewWALUnstuffer(r, opts...)
 }

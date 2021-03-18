@@ -22,7 +22,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 		}
 	}
 
-	return stuffedio.IndexName(prefix, start), buf.Bytes()
+	return fmt.Sprintf("%s-%016x", prefix, start), buf.Bytes()
 }
 
 func ExampleMultiUnstuffer() {
