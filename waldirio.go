@@ -9,16 +9,32 @@ import (
 )
 
 const (
-	journalPrefix = "journal"
+	defaultPrefix = "wal"
 )
 
 var (
 	indexPattern = regexp.MustCompile(`^(.+)-([a-fA-F0-9]+)$`)
 )
 
+// WALDirReaderOption defines an option for creating a dir-based write-ahead log.
+type WALDirReaderOption func(*WALDirReader)
+
+// WithPrefix sets the filename prefix for a WALDirReader. Otherwise it has a
+// sensible default. It is invalid (and silently ignored) to set the prefix to
+// an empty string.
+func WithPrefix(p string) WALDirReaderOption {
+	return func(w *WALDirReader) {
+		if p == "" {
+			return
+		}
+		w.prefix = p
+	}
+}
+
 // WALDirReader is a write-ahead log reader that works over specifically-named files in a directory.
 type WALDirReader struct {
 	fsys       fs.FS
+	prefix     string
 	readerImpl *WALReader
 }
 
@@ -28,8 +44,17 @@ type WALDirReader struct {
 // Dir method.
 //
 // Implements the RecordIterator and RecordAppender interfaces.
-func NewWALDirReader(fsys fs.FS) (*WALDirReader, error) {
-	names, err := FilesWithPrefix(fsys, journalPrefix)
+func NewWALDirReader(fsys fs.FS, opts ...WALDirReaderOption) (*WALDirReader, error) {
+	w := &WALDirReader{
+		fsys:   fsys,
+		prefix: defaultPrefix,
+	}
+
+	for _, opt := range opts {
+		opt(w)
+	}
+
+	names, err := FilesWithPattern(fsys, w.Pattern())
 	if err != nil {
 		return nil, fmt.Errorf("open wal dir: %w", err)
 	}
@@ -37,10 +62,14 @@ func NewWALDirReader(fsys fs.FS) (*WALDirReader, error) {
 		return nil, fmt.Errorf("open wal dir: no journal files found")
 	}
 
-	return &WALDirReader{
-		fsys:       fsys,
-		readerImpl: NewMultiReaderIter(NewFilesReaderIterator(fsys, names)).WAL(),
-	}, nil
+	w.readerImpl = NewMultiReaderIter(NewFilesReaderIterator(fsys, names)).WAL()
+	return w, nil
+}
+
+// Pattern returns a glob pattern that identifies files in this file system
+// that are relevant.
+func (w *WALDirReader) Pattern() string {
+	return w.prefix + "-*"
 }
 
 // Next reads the next record from the write-ahead log system of files. It can
@@ -61,11 +90,11 @@ func (w *WALDirReader) Close() error {
 	return w.readerImpl.Close()
 }
 
-// FilesWithPrefix finds files in the given file system
-func FilesWithPrefix(fsys fs.FS, prefix string) ([]string, error) {
-	matches, err := fs.Glob(fsys, prefix+"*")
+// FilesWithPattern finds files in the given file system
+func FilesWithPattern(fsys fs.FS, pattern string) ([]string, error) {
+	matches, err := fs.Glob(fsys, pattern)
 	if err != nil {
-		return nil, fmt.Errorf("find prefix %q: %w", prefix, err)
+		return nil, fmt.Errorf("find pattern %q: %w", pattern, err)
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		return matches[i] < matches[j]

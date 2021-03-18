@@ -7,6 +7,8 @@ import (
 	"testing/fstest"
 )
 
+const prefix = "journal"
+
 func fakeJournalData(start, end uint64) (string, []byte) {
 	buf := new(bytes.Buffer)
 	w := NewWALWriter(NewWriter(buf), WithFirstIndex(start))
@@ -18,7 +20,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 		}
 	}
 
-	return IndexName("journal", start), buf.Bytes()
+	return IndexName(prefix, start), buf.Bytes()
 }
 
 func ExampleWALDirReader() {
@@ -35,7 +37,7 @@ func ExampleWALDirReader() {
 	}
 
 	// Set up a journal reader for that file system.
-	r, err := NewWALDirReader(fakeFS)
+	r, err := NewWALDirReader(fakeFS, WithPrefix(prefix))
 	if err != nil {
 		log.Fatalf("Error opening journal fs: %v", err)
 	}
