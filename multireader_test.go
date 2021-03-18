@@ -23,24 +23,23 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 	return IndexName(prefix, start), buf.Bytes()
 }
 
-func ExampleWALDirReader() {
+func ExampleMultiReader() {
 	// Create a fake file system with some data in it.
 	fakeFS := make(fstest.MapFS)
+
+	var names []string
+
 	ends := []uint64{3, 5, 7}
 	start := uint64(1)
 	for _, end := range ends {
 		name, val := fakeJournalData(start, end)
-		fakeFS[name] = &fstest.MapFile{
-			Data: val,
-		}
+		names = append(names, name)
+		fakeFS[name] = &fstest.MapFile{Data: val}
 		start = end
 	}
 
-	// Set up a journal reader for that file system.
-	r, err := NewWALDirReader(fakeFS, WithPrefix(prefix))
-	if err != nil {
-		log.Fatalf("Error opening journal fs: %v", err)
-	}
+	// Create a MultiReader WAL that knows about these files, using a FilesReaderIterator.
+	r := NewMultiReaderIter(NewFilesReaderIterator(fakeFS, names)).WAL()
 	defer r.Close()
 
 	// Read entries in order.
