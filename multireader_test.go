@@ -13,7 +13,7 @@ const prefix = "journal"
 
 func fakeJournalData(start, end uint64) (string, []byte) {
 	buf := new(bytes.Buffer)
-	w := stuffedio.NewWriter(buf).WAL(stuffedio.WithFirstIndex(start))
+	w := stuffedio.NewStuffer(buf).WAL(stuffedio.WithFirstIndex(start))
 	defer w.Close()
 
 	for i := start; i < end; i++ {
@@ -25,7 +25,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 	return stuffedio.IndexName(prefix, start), buf.Bytes()
 }
 
-func ExampleMultiReader() {
+func ExampleMultiUnstuffer() {
 	// Create a fake file system with some data in it.
 	fakeFS := make(fstest.MapFS)
 
@@ -40,8 +40,8 @@ func ExampleMultiReader() {
 		start = end
 	}
 
-	// Create a MultiReader WAL that knows about these files, using a FilesReaderIterator.
-	r := stuffedio.NewMultiReaderIter(stuffedio.NewFilesReaderIterator(fakeFS, names)).WAL()
+	// Create a MultiUnstuffer WAL that knows about these files, using a FilesUnstufferIterator.
+	r := stuffedio.NewMultiUnstufferIter(stuffedio.NewFilesUnstufferIterator(fakeFS, names)).WAL()
 	defer r.Close()
 
 	// Read entries in order.

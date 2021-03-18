@@ -15,10 +15,10 @@ import (
 // 63 Characters, since 252 = 63 * 4.
 const c63 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
-func ExampleWriter() {
+func ExampleStuffer() {
 	buf := new(bytes.Buffer)
 
-	w := NewWriter(buf)
+	w := NewStuffer(buf)
 	if err := w.Append([]byte("A very short message")); err != nil {
 		log.Fatalf("Error appending: %v", err)
 	}
@@ -29,8 +29,8 @@ func ExampleWriter() {
 	// "\xfe\xfd\x14A very short message"
 }
 
-func ExampleReader() {
-	r := NewReader(bytes.NewBuffer([]byte("\xfe\xfd\x14A very short message\x00\x00\xfe\xfd\x05hello")))
+func ExampleUnstuffer() {
+	r := NewUnstuffer(bytes.NewBuffer([]byte("\xfe\xfd\x14A very short message\x00\x00\xfe\xfd\x05hello")))
 	for !r.Done() {
 		b, err := r.Next()
 		if err != nil {
@@ -44,8 +44,8 @@ func ExampleReader() {
 	// "hello"
 }
 
-func ExampleReader_SkipPartial() {
-	r := NewReader(bytes.NewBuffer([]byte("middle-of-record\xfe\xfd\x02AB")))
+func ExampleUnstuffer_SkipPartial() {
+	r := NewUnstuffer(bytes.NewBuffer([]byte("middle-of-record\xfe\xfd\x02AB")))
 	if err := r.SkipPartial(); err != nil {
 		log.Fatalf("Error skipping partial content: %v", err)
 	}
@@ -61,7 +61,7 @@ func ExampleReader_SkipPartial() {
 	// "AB"
 }
 
-func TestWriter_Append_one(t *testing.T) {
+func TestStuffer_Append_one(t *testing.T) {
 	cases := []struct {
 		name  string
 		write string
@@ -162,14 +162,14 @@ func TestWriter_Append_one(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewWriter(buf)
+		w := NewStuffer(buf)
 		if err := w.Append([]byte(test.write)); err != nil {
 			t.Fatalf("Append_one %q: writing: %v", test.name, err)
 		}
 		if diff := cmp.Diff(test.raw, string(buf.Bytes())); diff != "" {
 			t.Fatalf("Append_one %q: unexpected diff (-want +got):\n%v", test.name, diff)
 		}
-		r := NewReader(buf)
+		r := NewUnstuffer(buf)
 		b, err := r.Next()
 		switch {
 		case test.raw == "" && !errors.Is(err, io.EOF):
@@ -185,7 +185,7 @@ func TestWriter_Append_one(t *testing.T) {
 	}
 }
 
-func TestWriter_Append_multiple(t *testing.T) {
+func TestStuffer_Append_multiple(t *testing.T) {
 	cases := []struct {
 		name  string
 		write []string
@@ -202,7 +202,7 @@ func TestWriter_Append_multiple(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewWriter(buf)
+		w := NewStuffer(buf)
 		for _, val := range test.write {
 			if err := w.Append([]byte(val)); err != nil {
 				t.Fatalf("Append_multiple %q: %v", test.name, err)
@@ -210,7 +210,7 @@ func TestWriter_Append_multiple(t *testing.T) {
 		}
 
 		var got []string
-		r := NewReader(buf)
+		r := NewUnstuffer(buf)
 		for !r.Done() {
 			b, err := r.Next()
 			if err != nil {
@@ -225,7 +225,7 @@ func TestWriter_Append_multiple(t *testing.T) {
 	}
 }
 
-func TestReader_Next_corrupt(t *testing.T) {
+func TestUnstuffer_Next_corrupt(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -255,7 +255,7 @@ func TestReader_Next_corrupt(t *testing.T) {
 
 	for _, test := range cases {
 		buf := bytes.NewBuffer([]byte(test.raw))
-		r := NewReader(buf)
+		r := NewUnstuffer(buf)
 		for i, want := range test.want {
 			b, err := r.Next()
 			if err != nil {
@@ -275,7 +275,7 @@ func TestReader_Next_corrupt(t *testing.T) {
 	}
 }
 
-func TestReader_Consumed(t *testing.T) {
+func TestUnstuffer_Consumed(t *testing.T) {
 	type entry struct {
 		rawLen int
 		val    string
@@ -309,14 +309,14 @@ func TestReader_Consumed(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewWriter(buf)
+		w := NewStuffer(buf)
 		for i, e := range test.entries {
 			if err := w.Append([]byte(e.val)); err != nil {
 				t.Fatalf("Consumed %q (%d): Error appending: %v", test.name, i, err)
 			}
 		}
 
-		r := NewReader(buf)
+		r := NewUnstuffer(buf)
 		if r.Consumed() != 0 {
 			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, r.Consumed())
 		}
@@ -336,4 +336,110 @@ func TestReader_Consumed(t *testing.T) {
 			totalConsumed = r.Consumed()
 		}
 	}
+}
+
+func TestReverseUnstuffer(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		errs int
+		want []string
+	}{
+		{
+			name: "basic",
+			raw:  "\xfe\xfd\x03ABC\xfe\xfd\x03DEF",
+			want: []string{"DEF", "ABC"},
+		},
+		{
+			name: "missing-initial",
+			raw:  "ABC\xfe\xfd\x03DEF",
+			want: []string{"DEF"},
+			errs: 1,
+		},
+		{
+			name: "corrupt-end",
+			raw:  "\xfe\xfd\x03ABC\xfe\xfd\x03DEFG",
+			want: []string{"ABC"},
+			errs: 1,
+		},
+		{
+			name: "corrupt-beginning",
+			raw:  "\xfe\xfd\x02ABC\xfe\xfd\x03DEF",
+			want: []string{"DEF"},
+			errs: 1,
+		},
+		{
+			name: "corrupt-affects-neighbor",
+			raw:  "\xfe\xfd\x04ABC\xfe\xfd\x03DEF",
+			want: []string{"DEF"},
+			errs: 1,
+		},
+		{
+			name: "adjacent-delimiters",
+			raw:  "\xfe\xfd\xfe\xfd\xfe\xfd",
+			want: nil,
+			errs: 3,
+		},
+		{
+			name: "one-good-some-adjacent",
+			raw:  "\xfe\xfd\x03ABC\xfe\xfd\xfe\xfd",
+			want: []string{"ABC"},
+			errs: 2,
+		},
+	}
+
+	for _, test := range cases {
+		u := NewReverseUnstuffer(bytes.NewReader([]byte(test.raw)), int64(len(test.raw)))
+		var got []string
+		errs := 0
+		for !u.Done() {
+			b, err := u.Next()
+			if err != nil {
+				errs++
+				continue
+			}
+			got = append(got, string(b))
+		}
+
+		if test.errs != errs {
+			t.Fatalf("ReverseUnstuffer %q: expected %d errors, got %d", test.name, test.errs, errs)
+		}
+
+		if diff := cmp.Diff(test.want, got); diff != "" {
+			t.Fatalf("ReverseUnstuffer %q: unexpected diff (-want +got):\n%v", test.name, diff)
+		}
+	}
+}
+
+func ExampleReverseUnstuffer() {
+	msgs := []string{
+		"Message 1",
+		"Message 2",
+		"Message 3",
+		"Message 4",
+	}
+
+	buf := new(bytes.Buffer)
+
+	s := NewStuffer(buf)
+	for _, msg := range msgs {
+		if err := s.Append([]byte(msg)); err != nil {
+			log.Fatalf("Error appending: %v", err)
+		}
+	}
+
+	u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	for !u.Done() {
+		b, err := u.Next()
+		if err != nil {
+			log.Fatalf("Error reading in reverse: %v", err)
+		}
+		fmt.Printf("%q\n", b)
+	}
+
+	// Output
+	// "Message 4"
+	// "Message 3"
+	// "Message 2"
+	// "Message 1"
 }

@@ -15,7 +15,7 @@ type RecordIterator interface {
 	Done() bool
 }
 
-// WALReader is a write-ahead log reader implemented over a word-stuffed log.
+// WALUnstuffer is a write-ahead log reader implemented over a word-stuffed log.
 // The WAL concept adds a couple of important bits of data on top of the
 // unopinionated word-stuffing reader to ensure that records are checksummed
 // and ordered.
@@ -23,28 +23,28 @@ type RecordIterator interface {
 // In particular, it knows how to skip truly duplicate entries (with the same
 // index and checksum) where possibly only the last is not corrupt, and it
 // knows that record indices should be both compact and monotonic.
-type WALReader struct {
+type WALUnstuffer struct {
 	src       RecordIterator
 	buf       []byte
 	nextIndex uint64
 }
 
-// WALReaderOption defines options for write-ahead log readers.
-type WALReaderOption func(w *WALReader)
+// WALUnstufferOption defines options for write-ahead log readers.
+type WALUnstufferOption func(w *WALUnstuffer)
 
 // ExpectFirstIndex sets the expected initial index for this reader. A value of
 // zero (the default) indicates that any initial value is allowed, which
 // reduces its ability to check that you are reading from the expected file.
-func ExpectFirstIndex(index uint64) WALReaderOption {
-	return func(r *WALReader) {
+func ExpectFirstIndex(index uint64) WALUnstufferOption {
+	return func(r *WALUnstuffer) {
 		r.nextIndex = index
 	}
 }
 
-// NewWALReader creates a WALReader around the given record iterator, for
-// example, a Reader from this package.
-func NewWALReader(iter RecordIterator, opts ...WALReaderOption) *WALReader {
-	r := &WALReader{
+// NewWALUnstuffer creates a WALUnstuffer around the given record iterator, for
+// example, an Unstuffer from this package.
+func NewWALUnstuffer(iter RecordIterator, opts ...WALUnstufferOption) *WALUnstuffer {
+	r := &WALUnstuffer{
 		src: iter,
 	}
 
@@ -56,7 +56,7 @@ func NewWALReader(iter RecordIterator, opts ...WALReaderOption) *WALReader {
 }
 
 // unconditional read-ahead on the internal buffer.
-func (r *WALReader) readNext() ([]byte, error) {
+func (r *WALUnstuffer) readNext() ([]byte, error) {
 	if len(r.buf) != 0 {
 		b := r.buf
 		r.buf = nil
@@ -78,7 +78,7 @@ func (r *WALReader) readNext() ([]byte, error) {
 // under the assumption that they would have been retried.
 //
 // If the underlying stream is done, this returns io.EOF.
-func (r *WALReader) Next() (uint64, []byte, error) {
+func (r *WALUnstuffer) Next() (uint64, []byte, error) {
 	if r.Done() {
 		return 0, nil, io.EOF
 	}
@@ -140,12 +140,12 @@ func (r *WALReader) Next() (uint64, []byte, error) {
 }
 
 // Done returns true when all entries have been returned by Next.
-func (r *WALReader) Done() bool {
+func (r *WALUnstuffer) Done() bool {
 	return r.src.Done() && len(r.buf) == 0
 }
 
 // Close closes underlying implementations if they are io.Closers.
-func (r *WALReader) Close() error {
+func (r *WALUnstuffer) Close() error {
 	r.buf = nil
 	if c, ok := r.src.(io.Closer); ok {
 		return c.Close()
@@ -159,31 +159,31 @@ type AppendCloser interface {
 	Append([]byte) error
 }
 
-// WALWriter implements a write-ahead log around an AppendCloser (like a
-// Writer from this package). It requires every appended entry to have an
+// WALStuffer implements a write-ahead log around an AppendCloser (like a
+// Stuffer from this package). It requires every appended entry to have an
 // incremented index specified, and it checksums data before stuffing it into
-// the log, allowing a WALReader to detect accidental corruption.
-type WALWriter struct {
+// the log, allowing a WALUnstuffer to detect accidental corruption.
+type WALStuffer struct {
 	dest      AppendCloser
 	nextIndex uint64
 }
 
-// WALWriterOption specifies options for the write-ahead log writer.
-type WALWriterOption func(*WALWriter)
+// WALStufferOption specifies options for the write-ahead log writer.
+type WALStufferOption func(*WALStuffer)
 
 // WithFirstIndex sets the first index for this writer. Use this to start
 // appending to an existing log at the proper index (which must be the next
 // one). Default is 0, indicating that any first index will work.
-func WithFirstIndex(idx uint64) WALWriterOption {
-	return func(w *WALWriter) {
+func WithFirstIndex(idx uint64) WALStufferOption {
+	return func(w *WALStuffer) {
 		w.nextIndex = idx
 	}
 }
 
-// NewWALWriter creates a WALWriter around the given record appender (for
-// example, a Writer from this package).
-func NewWALWriter(a AppendCloser, opts ...WALWriterOption) *WALWriter {
-	w := &WALWriter{
+// NewWALStuffer creates a WALStuffer around the given record appender (for
+// example, a Stuffer from this package).
+func NewWALStuffer(a AppendCloser, opts ...WALStufferOption) *WALStuffer {
+	w := &WALStuffer{
 		dest: a,
 	}
 	for _, opt := range opts {
@@ -194,7 +194,7 @@ func NewWALWriter(a AppendCloser, opts ...WALWriterOption) *WALWriter {
 }
 
 // Append writes a new log entry into the WAL.
-func (w *WALWriter) Append(index uint64, p []byte) error {
+func (w *WALStuffer) Append(index uint64, p []byte) error {
 	if index == 0 {
 		return fmt.Errorf("index 0 is invalid as a starting index for a write-ahead log")
 	}
@@ -216,26 +216,26 @@ func (w *WALWriter) Append(index uint64, p []byte) error {
 }
 
 // Close closes underlying implementations if they are io.Closers.
-func (w *WALWriter) Close() error {
+func (w *WALStuffer) Close() error {
 	return w.dest.Close()
 }
 
 // NextIndex returns the next expected write index for this writer.
-func (w *WALWriter) NextIndex() uint64 {
+func (w *WALStuffer) NextIndex() uint64 {
 	return w.nextIndex
 }
 
 // WAL returns a write-ahead log reader based on this stuffed log.
-func (r *Reader) WAL(opts ...WALReaderOption) *WALReader {
-	return NewWALReader(r, opts...)
+func (r *Unstuffer) WAL(opts ...WALUnstufferOption) *WALUnstuffer {
+	return NewWALUnstuffer(r, opts...)
 }
 
 // WAL returns a write-ahead log writer on top of a stuffed log.
-func (w *Writer) WAL(opts ...WALWriterOption) *WALWriter {
-	return NewWALWriter(w, opts...)
+func (w *Stuffer) WAL(opts ...WALStufferOption) *WALStuffer {
+	return NewWALStuffer(w, opts...)
 }
 
 // WAL produces a write-ahead log over top of this multi reader.
-func (r *MultiReader) WAL(opts ...WALReaderOption) *WALReader {
-	return NewWALReader(r, opts...)
+func (r *MultiUnstuffer) WAL(opts ...WALUnstufferOption) *WALUnstuffer {
+	return NewWALUnstuffer(r, opts...)
 }

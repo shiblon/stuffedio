@@ -13,44 +13,44 @@ var (
 	indexPattern = regexp.MustCompile(`^(.+)-([a-fA-F0-9]+)$`)
 )
 
-// ReaderIterator is an iterator over Readers, for use with the MultiReader.
-type ReaderIterator interface {
+// UnstufferIterator is an iterator over Unstuffers, for use with the MultiUnstuffer.
+type UnstufferIterator interface {
 	io.Closer
 
-	Next() (*Reader, error)
+	Next() (*Unstuffer, error)
 	Done() bool
 }
 
-// MultiReader wraps multiple readers, either specified directly or through a
+// MultiUnstuffer wraps multiple readers, either specified directly or through a
 // reader iterator interface that can produce them on demanad. This is useful
 // when concatenating multiple file shards together as a single record store.
-type MultiReader struct {
-	readers    []*Reader
-	readerIter ReaderIterator
+type MultiUnstuffer struct {
+	readers    []*Unstuffer
+	readerIter UnstufferIterator
 
-	reader *Reader
+	reader *Unstuffer
 }
 
-// NewMultiReader creates a MultiReader from a slice of readers. These are
+// NewMultiUnstuffer creates a MultiUnstuffer from a slice of readers. These are
 // ordered, and will be consumed in the order given.
-func NewMultiReader(readers []*Reader) *MultiReader {
-	return &MultiReader{
+func NewMultiUnstuffer(readers []*Unstuffer) *MultiUnstuffer {
+	return &MultiUnstuffer{
 		readers: readers,
 	}
 }
 
-// NewMultiReaderFunc creates a MultiReader where each reader is requested, one
+// NewMultiUnstufferIter creates a MultiUnstuffer where each reader is requested, one
 // at a time, through the given reader-returning function. The function is
-// expected to return a nil Reader if there are no more readers.
-func NewMultiReaderIter(ri ReaderIterator) *MultiReader {
-	return &MultiReader{
+// expected to return a nil Unstuffer if there are no more readers.
+func NewMultiUnstufferIter(ri UnstufferIterator) *MultiUnstuffer {
+	return &MultiUnstuffer{
 		readerIter: ri,
 	}
 }
 
-// ensureReader makes sure that there is a current reader available that isn't
+// ensureUnstuffer makes sure that there is a current reader available that isn't
 // exhausted, if possible.
-func (r *MultiReader) ensureReader() error {
+func (r *MultiUnstuffer) ensureUnstuffer() error {
 	// Current and not exhausted.
 	if r.reader != nil {
 		if !r.reader.Done() {
@@ -81,15 +81,15 @@ func (r *MultiReader) ensureReader() error {
 }
 
 // Next gets the next record for these readers.
-func (r *MultiReader) Next() ([]byte, error) {
-	if err := r.ensureReader(); err != nil {
+func (r *MultiUnstuffer) Next() ([]byte, error) {
+	if err := r.ensureUnstuffer(); err != nil {
 		return nil, fmt.Errorf("multi next: %w", err)
 	}
 	return r.reader.Next()
 }
 
 // Done returns whether this multi reader has exhausted all underlying readers.
-func (r *MultiReader) Done() bool {
+func (r *MultiUnstuffer) Done() bool {
 	if r.readerIter == nil && len(r.readers) == 0 {
 		return true
 	}
@@ -109,7 +109,7 @@ func (r *MultiReader) Done() bool {
 }
 
 // Close closes the currently busy underlying reader and reader iterator, if any.
-func (r *MultiReader) Close() error {
+func (r *MultiUnstuffer) Close() error {
 	defer func() {
 		r.reader = nil
 		r.readers = nil
@@ -136,24 +136,24 @@ func (r *MultiReader) Close() error {
 	return fmt.Errorf("wal dir close: %v", strings.Join(msgs, " :: "))
 }
 
-// FilesReaderIterator is an iterator over readers based on a list of file names.
-type FilesReaderIterator struct {
+// FilesUnstufferIterator is an iterator over readers based on a list of file names.
+type FilesUnstufferIterator struct {
 	fsys     fs.FS
 	names    []string
 	file     io.ReadCloser
 	nextName int
 }
 
-// NewFilesReaderIterator creates a new iterator from a list of file names.
-func NewFilesReaderIterator(fsys fs.FS, names []string) *FilesReaderIterator {
-	return &FilesReaderIterator{
+// NewFilesUnstufferIterator creates a new iterator from a list of file names.
+func NewFilesUnstufferIterator(fsys fs.FS, names []string) *FilesUnstufferIterator {
+	return &FilesUnstufferIterator{
 		names: names,
 		fsys:  fsys,
 	}
 }
 
 // Next returns a new reader if possible, or io.EOF.
-func (r *FilesReaderIterator) Next() (*Reader, error) {
+func (r *FilesUnstufferIterator) Next() (*Unstuffer, error) {
 	if r.Done() {
 		return nil, io.EOF
 	}
@@ -170,16 +170,16 @@ func (r *FilesReaderIterator) Next() (*Reader, error) {
 		return nil, fmt.Errorf("next reader file: %w", err)
 	}
 	r.file = f
-	return NewReader(f), nil
+	return NewUnstuffer(f), nil
 }
 
 // Done returns true iff there are no more readers to produce.
-func (r *FilesReaderIterator) Done() bool {
+func (r *FilesUnstufferIterator) Done() bool {
 	return r.nextName >= len(r.names)
 }
 
 // Close closes the last file, if there is one open, and makes this return io.EOF ever after.
-func (r *FilesReaderIterator) Close() error {
+func (r *FilesUnstufferIterator) Close() error {
 	r.nextName = len(r.names)
 	if r.file != nil {
 		return r.file.Close()

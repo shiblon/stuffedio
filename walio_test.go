@@ -12,7 +12,7 @@ import (
 
 func ExampleReadWrite() {
 	buf := new(bytes.Buffer)
-	w := NewWriter(buf).WAL()
+	w := NewStuffer(buf).WAL()
 
 	// Write messages.
 	msgs := []string{
@@ -28,7 +28,7 @@ func ExampleReadWrite() {
 	}
 
 	// Now read them back.
-	r := NewReader(buf).WAL()
+	r := NewUnstuffer(buf).WAL()
 	for !r.Done() {
 		idx, val, err := r.Next()
 		if err != nil {
@@ -131,7 +131,7 @@ func TestWAL(t *testing.T) {
 		buf := new(bytes.Buffer)
 
 		// Test writes.
-		w := NewWALWriter(NewWriter(buf), WithFirstIndex(test.writeFirstIndex))
+		w := NewWALStuffer(NewStuffer(buf), WithFirstIndex(test.writeFirstIndex))
 
 		var writeErr error
 		for _, entry := range test.entries {
@@ -164,7 +164,7 @@ func TestWAL(t *testing.T) {
 		}
 
 		// Test reads.
-		r := NewWALReader(NewReader(buf), ExpectFirstIndex(test.readInitialIndex))
+		r := NewWALUnstuffer(NewUnstuffer(buf), ExpectFirstIndex(test.readInitialIndex))
 
 		entryIdx := 0
 		var readErr error
