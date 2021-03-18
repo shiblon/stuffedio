@@ -505,13 +505,6 @@ func (r *Reader) Next() ([]byte, error) {
 		return nil, fmt.Errorf("next: no leading delimiter in record: %w", CorruptRecord)
 	}
 
-	// We keep track of whether we got a full run. We'll reset this to false in
-	// the beginning of the long loop (because more is coming), and set it
-	// again in the middle. If we end up all the way at the bottom with this
-	// set, the last read was a full run (exactly max length) and we should not
-	// remove the (implicitly added) delimiter at the end.
-	fullRun := false
-
 	// Read the first (small) section.
 	b := r.scanN(1)
 	if len(b) != 1 {
@@ -521,9 +514,12 @@ func (r *Reader) Next() ([]byte, error) {
 	if smallSize > smallLimit {
 		return nil, fmt.Errorf("next: short size header %d is too large: %w", smallSize, CorruptRecord)
 	}
-	if smallSize == smallLimit {
-		fullRun = true
-	}
+
+	// We keep track of whether we got a full segment. We track this for every
+	// segment, overwriting it with later segments so as to get the "final
+	// word" on whether the last segment was full.
+	lastIsFull := smallSize == smallLimit
+
 	// The size portion can't be part of a delimiter, because it would have
 	// triggered a "too big" error. Now we scan for delimiters while reading
 	// from the buffer. Technically, when everything goes well, we should
@@ -550,7 +546,6 @@ func (r *Reader) Next() ([]byte, error) {
 
 	// Now we read zero or more large sections, stopping when we hit a delimiter or the end of the input stream.
 	for !r.atDelimiter() && !r.Done() {
-		fullRun = false
 		if err := r.fillBuf(); err != nil {
 			return nil, fmt.Errorf("next: %w", err)
 		}
@@ -566,9 +561,8 @@ func (r *Reader) Next() ([]byte, error) {
 		if size > largeLimit {
 			return nil, fmt.Errorf("next: large interior size %d: %w", size, CorruptRecord)
 		}
-		if size == largeLimit {
-			fullRun = true
-		}
+		// New record segment, recalculate.
+		lastIsFull = size == largeLimit
 		b = r.scanN(size)
 		if len(b) != size {
 			return nil, fmt.Errorf("next: wanted long %d, got %d: %w", size, len(b), CorruptRecord)
@@ -584,7 +578,7 @@ func (r *Reader) Next() ([]byte, error) {
 		}
 	}
 
-	// The last block is special, because if it is short, that does not imply
+	// The last block is special, because if it is short, that does *not* imply
 	// that it ended with a delimiter inside it. It's just the end (and the
 	// next block starting will halt the scan).
 	// We remove implicit delimiters on final blocks that aren't full length,
@@ -595,7 +589,7 @@ func (r *Reader) Next() ([]byte, error) {
 	// Thus, if the last block is full length, we don't trim off the last
 	// implicit delimiter bytes.
 	end := buf.Len()
-	if !fullRun {
+	if !lastIsFull {
 		end -= len(reserved)
 	}
 	return buf.Bytes()[:end], nil
