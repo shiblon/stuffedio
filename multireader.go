@@ -48,11 +48,6 @@ func NewMultiReaderIter(ri ReaderIterator) *MultiReader {
 	}
 }
 
-// WAL produces a write-ahead log over top of this multi reader.
-func (r *MultiReader) WAL() *WALReader {
-	return NewWALReader(r)
-}
-
 // ensureReader makes sure that there is a current reader available that isn't
 // exhausted, if possible.
 func (r *MultiReader) ensureReader() error {

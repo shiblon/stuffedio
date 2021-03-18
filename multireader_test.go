@@ -11,7 +11,7 @@ const prefix = "journal"
 
 func fakeJournalData(start, end uint64) (string, []byte) {
 	buf := new(bytes.Buffer)
-	w := NewWALWriter(NewWriter(buf), WithFirstIndex(start))
+	w := NewWriter(buf).WAL(WithFirstIndex(start))
 	defer w.Close()
 
 	for i := start; i < end; i++ {

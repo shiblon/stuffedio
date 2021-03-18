@@ -234,3 +234,8 @@ func (r *Reader) WAL(opts ...WALReaderOption) *WALReader {
 func (w *Writer) WAL(opts ...WALWriterOption) *WALWriter {
 	return NewWALWriter(w, opts...)
 }
+
+// WAL produces a write-ahead log over top of this multi reader.
+func (r *MultiReader) WAL(opts ...WALReaderOption) *WALReader {
+	return NewWALReader(r, opts...)
+}
