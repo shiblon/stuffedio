@@ -1,17 +1,19 @@
-package stuffedio
+package stuffedio_test
 
 import (
 	"bytes"
 	"fmt"
 	"log"
 	"testing/fstest"
+
+	"entrogo.com/stuffedio"
 )
 
 const prefix = "journal"
 
 func fakeJournalData(start, end uint64) (string, []byte) {
 	buf := new(bytes.Buffer)
-	w := NewWriter(buf).WAL(WithFirstIndex(start))
+	w := stuffedio.NewWriter(buf).WAL(stuffedio.WithFirstIndex(start))
 	defer w.Close()
 
 	for i := start; i < end; i++ {
@@ -20,7 +22,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 		}
 	}
 
-	return IndexName(prefix, start), buf.Bytes()
+	return stuffedio.IndexName(prefix, start), buf.Bytes()
 }
 
 func ExampleMultiReader() {
@@ -39,7 +41,7 @@ func ExampleMultiReader() {
 	}
 
 	// Create a MultiReader WAL that knows about these files, using a FilesReaderIterator.
-	r := NewMultiReaderIter(NewFilesReaderIterator(fakeFS, names)).WAL()
+	r := stuffedio.NewMultiReaderIter(stuffedio.NewFilesReaderIterator(fakeFS, names)).WAL()
 	defer r.Close()
 
 	// Read entries in order.
