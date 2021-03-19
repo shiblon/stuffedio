@@ -129,9 +129,15 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	var latestSnapshot string
 	if len(sNames) != 0 {
 		latestSnapshot = sNames[len(sNames)-1]
-	}
 
-	// TODO: clean up any non-latest snapshots? Move to a "clean up later" location?
+		// Move early snapshots to non-matching names. Can be collected later.
+		earlier := sNames[:len(sNames)-1]
+		for _, name := range earlier {
+			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+				return nil, fmt.Errorf("open wal move early snapshots: %w", err)
+			}
+		}
+	}
 
 	jStart := 0
 	for i, name := range jNames {
@@ -141,7 +147,12 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		}
 	}
 
-	// TODO: clean up any journal files before jStart? Move them to a "please collect me" location?
+	// Move early journals to non-matching names. Can be collected later.
+	for _, name := range jNames[:jStart] {
+		if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+			return nil, fmt.Errorf("open wal move early journals: %w", err)
+		}
+	}
 
 	if latestSnapshot != "" {
 		if w.snapshotAdder == nil {
