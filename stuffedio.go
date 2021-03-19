@@ -328,10 +328,10 @@ func (s *Stuffer) Close() error {
 type Unstuffer struct {
 	src      io.Reader
 	buf      []byte
-	consumed int  // number of bytes actually consumed by the decoder.
-	pos      int  // position in the unused read buffer.
-	end      int  // one past the end of unused data.
-	ended    bool // EOF reached, don't read again.
+	consumed int64 // number of bytes actually consumed by the decoder.
+	pos      int   // position in the unused read buffer.
+	end      int   // one past the end of unused data.
+	ended    bool  // EOF reached, don't read again.
 }
 
 // NewUnstuffer creates an Unstuffer from the given src, which is assumed to be
@@ -381,7 +381,7 @@ func (u *Unstuffer) fillBuf() error {
 // Silently fails to move all the way if it encounters end first.
 func (u *Unstuffer) advance(n int) {
 	u.pos += n
-	u.consumed += n
+	u.consumed += int64(n)
 }
 
 // bufLen indicates how many bytes are available in the buffer.
@@ -395,7 +395,7 @@ func (u *Unstuffer) bufData() []byte {
 }
 
 // Consumed returns the number of bytes consumed from the underlying stream (not read, used).
-func (u *Unstuffer) Consumed() int {
+func (u *Unstuffer) Consumed() int64 {
 	return u.consumed
 }
 

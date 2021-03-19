@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"regexp"
 	"sort"
@@ -131,27 +132,40 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		finalSize  int64
 		finalFirst uint64
 		finalLast  uint64
+
+		prevConsumed int
+		newFile      bool
 	)
 	if len(jNames) != 0 {
-		f, err := fsys.Open(jNames[len(jNames)-1])
-		if err != nil {
-			return nil, fmt.Errorf("open wal final open: %w", err)
-		}
-		finalSize, finalFirst, finalLast, err = WALStats(f)
-		if err != nil {
-			return nil, fmt.Errorf("open wal final stats: %w", err)
-		}
+		filesIter := stuffedio.NewFileUnstufferIterator(fsys, jNames)
+		jUnstuffer := stuffedio.NewMultiUnstufferIter(filesIter)
+		jWALReader := stuffedio.NewWALUnstuffer(jUnstuffer)
 
-		jReader := stuffedio.NewMultiUnstufferIter(stuffedio.NewFileUnstufferIterator(fsys, jNames)).WAL()
-		for !jReader.Done() {
-			idx, b, err := jReader.Next()
+		// Keep track of how much was consumed when the previous file
+		// finished, so we can calculate the final file's size.
+		// Also track the expected index when a new file starts (which will be
+		// the previous one-past-end index).
+		filesIter.RegisterOnStart(func(_ fs.File) error {
+			prevConsumed = jUnstuffer.Consumed()
+			newFile = true // signal that the next successful "Next" call has a good index.
+		})
+
+		for !jWALReader.Done() {
+			idx, b, err := jWALReader.Next()
 			if err != nil {
 				return nil, fmt.Errorf("open wal journal next (%d): %w", idx, err)
 			}
+			if newFile {
+				newFile = false
+				finalFirst = idx
+			}
+			finalLast = idx
 			if err := w.journalPlayer.Play(b); err != nil {
 				return nil, fmt.Errorf("open wal journal play (%d): %w", idx, err)
 			}
 		}
+
+		finalSize = jUnstuffer.Consumed() - prevConsumed
 	}
 
 	// TODO:
@@ -169,15 +183,14 @@ func WALStats(f fs.File) (size int64, first, last uint64, err error) {
 		return 0, 0, 0, fmt.Errorf("wal stats: %w", err)
 	}
 
-	r, ok := f.(io.ReaderAt)
-	if !ok {
-		return 0, 0, 0, fmt.Errorf("wal stats, underlying type %T is not a ReaderAt", f)
-	}
-
-	uBackward := stuffedio.NewReverseUnstuffer(r, fi.Size()).WAL()
-	last, _, err = uBackward.Next()
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("wal stats, last: %w", err)
+	if r, ok := f.(io.ReaderAt); ok {
+		uBackward := stuffedio.NewReverseUnstuffer(r, fi.Size()).WAL()
+		last, _, err = uBackward.Next()
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("wal stats, last: %w", err)
+		}
+	} else {
+		log.Printf("Can't reverse iterate on %T, not a ReaderAt, falling back to slow forward iteration", f)
 	}
 
 	uForward := stuffedio.NewUnstuffer(f).WAL()

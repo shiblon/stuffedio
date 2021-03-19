@@ -277,7 +277,7 @@ func TestUnstuffer_Next_corrupt(t *testing.T) {
 
 func TestUnstuffer_Consumed(t *testing.T) {
 	type entry struct {
-		rawLen int
+		rawLen int64
 		val    string
 	}
 
@@ -320,7 +320,7 @@ func TestUnstuffer_Consumed(t *testing.T) {
 		if r.Consumed() != 0 {
 			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, r.Consumed())
 		}
-		totalConsumed := 0
+		totalConsumed := int64(0)
 		for i := 0; i < len(test.entries) && !r.Done(); i++ {
 			b, err := r.Next()
 			if err != nil {

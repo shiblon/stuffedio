@@ -23,6 +23,8 @@ type MultiUnstuffer struct {
 	readerIter UnstufferIterator
 
 	reader *Unstuffer
+
+	prevConsumed int64
 }
 
 // NewMultiUnstuffer creates a MultiUnstuffer from a slice of readers. These are
@@ -50,7 +52,8 @@ func (r *MultiUnstuffer) ensureUnstuffer() error {
 		if !r.reader.Done() {
 			return nil
 		}
-		// Exhausted, close it.
+		// Exhausted, close it and remember how much it consumed.
+		r.prevConsumed += r.reader.Consumed()
 		r.reader.Close()
 		r.reader = nil
 	}
@@ -72,6 +75,14 @@ func (r *MultiUnstuffer) ensureUnstuffer() error {
 	r.reader = r.readers[0]
 	r.readers = r.readers[1:]
 	return nil
+}
+
+// Consumed returns the total number of bytes consumed thus far.
+func (r *MultiUnstuffer) Consumed() int64 {
+	if r.reader != nil {
+		return r.prevConsumed + r.reader.Consumed()
+	}
+	return r.prevConsumed
 }
 
 // Next gets the next record for these readers.
@@ -136,6 +147,8 @@ type FilesUnstufferIterator struct {
 	names    []string
 	file     io.ReadCloser
 	nextName int
+
+	onStart func(fs.File) error
 }
 
 // NewFilesUnstufferIterator creates a new iterator from a list of file names.
@@ -144,6 +157,11 @@ func NewFilesUnstufferIterator(fsys fs.FS, names []string) *FilesUnstufferIterat
 		names: names,
 		fsys:  fsys,
 	}
+}
+
+// RegisterOnStart registers a function to be called when a new file is about to be started.
+func (r *FilesUnstufferIterator) RegisterOnStart(f func(fs.File) error) {
+	r.onStart = f
 }
 
 // Next returns a new reader if possible, or io.EOF.
@@ -162,6 +180,9 @@ func (r *FilesUnstufferIterator) Next() (*Unstuffer, error) {
 	f, err := r.fsys.Open(r.names[r.nextName])
 	if err != nil {
 		return nil, fmt.Errorf("next reader file: %w", err)
+	}
+	if r.onStart != nil {
+		r.onStart(f)
 	}
 	r.file = f
 	return NewUnstuffer(f), nil
