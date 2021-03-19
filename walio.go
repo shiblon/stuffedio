@@ -179,6 +179,8 @@ type AppendCloser interface {
 type WALStuffer struct {
 	dest      AppendCloser
 	nextIndex uint64
+
+	onClose func() error
 }
 
 // WALStufferOption specifies options for the write-ahead log writer.
@@ -229,9 +231,21 @@ func (w *WALStuffer) Append(index uint64, p []byte) (int, error) {
 	return n, nil
 }
 
+// RegisterClose registers a function to call when the WALStuffer is closed.
+// Can be used, for example, to do atomic renames when snapshotting to a WAL.
+func (w *WALStuffer) RegisterClose(f func() error) {
+	w.onClose = f
+}
+
 // Close closes underlying implementations if they are io.Closers.
 func (w *WALStuffer) Close() error {
-	return w.dest.Close()
+	err := w.dest.Close()
+	if w.onClose != nil {
+		if err := w.onClose(); err != nil {
+			return err
+		}
+	}
+	return err
 }
 
 // NextIndex returns the next expected write index for this writer.

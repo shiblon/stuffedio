@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"entrogo.com/stuffedio"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -34,17 +32,15 @@ func TestWAL_Snapshots(t *testing.T) {
 
 	// Create a snapshot.
 	func() {
-		snapName := IndexName(DefaultSnapshotPrefix, uint64(len(snapValues)))
-		snap, err := os.OpenFile(filepath.Join(dir, snapName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		snap, err := CreateSnapshot(dir, DefaultSnapshotBase, uint64(len(snapValues)))
 		if err != nil {
 			t.Fatalf("WAL snapshot create: %v", err)
 		}
-		w := stuffedio.NewStuffer(snap).WAL()
-		defer w.Close()
+		defer snap.Close()
 
 		for i, v := range snapValues {
 			idx := uint64(i + 1)
-			if _, err := w.Append(idx, []byte(v)); err != nil {
+			if _, err := snap.Append(idx, []byte(v)); err != nil {
 				t.Fatalf("WAL snapshot append: %v", err)
 			}
 		}
@@ -81,8 +77,8 @@ func TestWAL_Snapshots(t *testing.T) {
 	}()
 
 	expectNames := []string{
-		"j-0000000000000004",
-		"s-0000000000000003",
+		"0000000000000003-snapshot",
+		"0000000000000004-journal",
 	}
 	ds, err := fs.ReadDir(os.DirFS(dir), ".")
 	if err != nil {
@@ -199,9 +195,9 @@ func TestWAL_JournalOnly(t *testing.T) {
 
 	// Check that we have expected names.
 	expectNames := []string{
-		"j-0000000000000001",
-		"j-0000000000000003",
-		"j-0000000000000005",
+		"0000000000000001-journal",
+		"0000000000000003-journal",
+		"0000000000000005-journal",
 	}
 	var gotNames []string
 	ds, err := os.ReadDir(dir)
@@ -252,7 +248,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 	}
 
 	// Check that a new file was added due to rotation.
-	allNames := append(expectNames, "j-0000000000000007")
+	allNames := append(expectNames, "0000000000000007-journal")
 	gotNames = nil
 	ds, err = os.ReadDir(dir)
 	for _, de := range ds {

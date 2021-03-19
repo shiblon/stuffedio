@@ -5,6 +5,7 @@ package wal
 import (
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,14 +16,14 @@ import (
 )
 
 const (
-	DefaultJournalPrefix  = "j"
-	DefaultSnapshotPrefix = "s"
-	DefaultMaxIndices     = 10 * 1 << 10 // 10Ki
-	DefaultMaxBytes       = 10 * 1 << 20 // 10Mi
+	DefaultJournalBase  = "journal"
+	DefaultSnapshotBase = "snapshot"
+	DefaultMaxIndices   = 10 * 1 << 10 // 10Ki
+	DefaultMaxBytes     = 10 * 1 << 20 // 10Mi
 )
 
 var (
-	indexPattern = regexp.MustCompile(`^([^.]+)-([a-fA-F0-9]+)$`)
+	indexPattern = regexp.MustCompile(`^([a-fA-F0-9]+)-([^.]+)$`)
 )
 
 // Loader is a function type called by snapshot item loads and journal entry replay.
@@ -31,17 +32,17 @@ type Loader func([]byte) error
 // Option describes a WAL creation option.
 type Option func(*WAL)
 
-// WithJournalPrefix sets the journal prefix, otherwise uses DefaultJournalPrefix.
-func WithJournalPrefix(p string) Option {
+// WithJournalBase sets the journal base, otherwise uses DefaultJournalBase.
+func WithJournalBase(p string) Option {
 	return func(w *WAL) {
-		w.journalPrefix = p
+		w.journalBase = p
 	}
 }
 
-// WithSnaphotPrefix sets the snapshot prefix, otherwise uses DefaultSnapshotPrefix.
-func WithSnapshotPrefix(p string) Option {
+// WithSnaphotBase sets the snapshot base, otherwise uses DefaultSnapshotBase.
+func WithSnapshotBase(p string) Option {
 	return func(w *WAL) {
-		w.snapshotPrefix = p
+		w.snapshotBase = p
 	}
 }
 
@@ -105,8 +106,8 @@ func WithAllowEmptySnapshotAdder(a bool) Option {
 // when full, etc.
 type WAL struct {
 	dir               string
-	journalPrefix     string
-	snapshotPrefix    string
+	journalBase       string
+	snapshotBase      string
 	maxJournalBytes   int64
 	maxJournalIndices int
 
@@ -115,6 +116,8 @@ type WAL struct {
 
 	snapshotAdder Loader
 	journalPlayer Loader
+
+	snapshotWasLast bool // If the snapshot was the last thing read (no later journals).
 
 	currSize    int64                 // Current size of current journal file.
 	currCount   int                   // Current number of indices in current journal file.
@@ -128,10 +131,10 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	w := &WAL{
 		dir: dir,
 
-		journalPrefix:     DefaultJournalPrefix,
+		journalBase:       DefaultJournalBase,
 		maxJournalBytes:   DefaultMaxBytes,
 		maxJournalIndices: DefaultMaxIndices,
-		snapshotPrefix:    DefaultSnapshotPrefix,
+		snapshotBase:      DefaultSnapshotBase,
 	}
 
 	for _, opt := range opts {
@@ -140,26 +143,50 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 
 	fsys := os.DirFS(dir)
 
-	sNames, err := fs.Glob(fsys, w.snapshotPrefix+"-*")
-	if err != nil {
-		return nil, fmt.Errorf("open wal: %w", err)
+	type entry struct {
+		i    uint64
+		name string
 	}
-	sort.Strings(sNames)
 
-	jNames, err := fs.Glob(fsys, w.journalPrefix+"-*")
+	var (
+		snapshotEntries []entry
+		journalEntries  []entry
+	)
+
+	ds, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		return nil, fmt.Errorf("open wal: %w", err)
+		return nil, fmt.Errorf("open wal list files: %w", err)
 	}
-	sort.Strings(jNames)
+	for _, de := range ds {
+		base, idx, err := ParseIndexName(de.Name())
+		if err != nil {
+			log.Printf("Unrecognized file pattern in %q, skipping", de.Name())
+		}
+		switch base {
+		case w.journalBase:
+			journalEntries = append(journalEntries, entry{idx, de.Name()})
+		case w.snapshotBase:
+			snapshotEntries = append(snapshotEntries, entry{idx, de.Name()})
+		default:
+			log.Printf("Unrecognized file base in %q, skipping", de.Name())
+		}
+	}
+	sort.Slice(snapshotEntries, func(i, j int) bool {
+		return snapshotEntries[i].i < snapshotEntries[j].i
+	})
+	sort.Slice(journalEntries, func(i, j int) bool {
+		return journalEntries[i].i < journalEntries[j].i
+	})
 
-	latestSnapshot := ""
-	if len(sNames) != 0 {
-		latestSnapshot = sNames[len(sNames)-1]
+	snapshotEntry := entry{}
+	if len(snapshotEntries) != 0 {
+		snapshotEntry = snapshotEntries[len(snapshotEntries)-1]
 
 		if w.allowWrite {
 			// Move early snapshots to non-matching names. Can be collected later.
-			earlier := sNames[:len(sNames)-1]
-			for _, name := range earlier {
+			earlier := snapshotEntries[:len(snapshotEntries)-1]
+			for _, e := range earlier {
+				name := e.name
 				if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
 					return nil, fmt.Errorf("open wal move early snapshots: %w", err)
 				}
@@ -168,8 +195,8 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	}
 
 	jStart := 0
-	for i, name := range jNames {
-		if name > latestSnapshot {
+	for i, entry := range journalEntries {
+		if entry.i > snapshotEntry.i {
 			jStart = i
 			break
 		}
@@ -177,21 +204,21 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 
 	// Move early journals to non-matching names. Can be collected later.
 	if w.allowWrite {
-		for _, name := range jNames[:jStart] {
-			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+		for _, e := range journalEntries[:jStart] {
+			if err := os.Rename(filepath.Join(dir, e.name), filepath.Join(dir, "_old__"+e.name)); err != nil {
 				return nil, fmt.Errorf("open wal move early journals: %w", err)
 			}
 		}
 	}
 
-	if latestSnapshot != "" {
+	if snapshotEntry.name != "" {
 		// Only allow snapshot load to be skipped if explicitly asked.
 		if !w.allowEmptyAdder && w.snapshotAdder == nil {
 			return nil, fmt.Errorf("open wal: snapshot found but no snapshot adder option given")
 		}
 		// Skip reading snapshot if requested.
 		if w.snapshotAdder != nil {
-			f, err := fsys.Open(latestSnapshot)
+			f, err := fsys.Open(snapshotEntry.name)
 			if err != nil {
 				return nil, fmt.Errorf("open wal open snapshot: %w", err)
 			}
@@ -208,15 +235,18 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		}
 	}
 
-	jNames = jNames[jStart:]
+	var jNames []string
+	for _, e := range journalEntries[jStart:] {
+		jNames = append(jNames, e.name)
+	}
 
 	// If we have a snapshot, then it is expected that the next journal file in
 	// line has a name that is exactly 1 more than the index in the snapshot
 	// name. Thus, the snapshot is named after the most recent journal's final
 	// good index.
 	w.nextIndex = 0
-	if latestSnapshot != "" {
-		_, idx, err := ParseIndexName(latestSnapshot)
+	if snapshotEntry.name != "" {
+		_, idx, err := ParseIndexName(snapshotEntry.name)
 		if err != nil {
 			return nil, fmt.Errorf("open wal snapshot parse: %w", err)
 		}
@@ -260,7 +290,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 			w.currCount++
 			if !checked {
 				checked = true
-				if err := CheckIndexName(name, w.journalPrefix, idx); err != nil {
+				if err := CheckIndexName(name, w.journalBase, idx); err != nil {
 					return nil, fmt.Errorf("open wal check: %w", err)
 				}
 			}
@@ -368,7 +398,7 @@ func (w *WAL) rotate() error {
 		}
 	}
 	// Open new.
-	f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalPrefix, w.nextIndex)))
+	f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalBase, w.nextIndex)))
 	if err != nil {
 		return fmt.Errorf("rotate: %w", err)
 	}
@@ -379,12 +409,12 @@ func (w *WAL) rotate() error {
 }
 
 // IndexName returns a string for the given index value.
-func IndexName(prefix string, idx uint64) string {
-	return fmt.Sprintf("%s-%016x", prefix, idx)
+func IndexName(base string, idx uint64) string {
+	return fmt.Sprintf("%016x-%s", idx, base)
 }
 
-// CheckIndexName checkes that the given file name contains the right prefix and index.
-func CheckIndexName(name, prefix string, index uint64) error {
+// CheckIndexName checkes that the given file name contains the right base and index.
+func CheckIndexName(name, base string, index uint64) error {
 	p, i, err := ParseIndexName(name)
 	if err != nil {
 		return fmt.Errorf("check index name %q: %w", name, err)
@@ -392,22 +422,41 @@ func CheckIndexName(name, prefix string, index uint64) error {
 	if i != index {
 		return fmt.Errorf("check index name %q: data index is %d, but filename index is %d", name, index, i)
 	}
-	if p != prefix {
-		return fmt.Errorf("check index name %q: desired prefix %q, but filename prefix is %q", name, prefix, p)
+	if p != base {
+		return fmt.Errorf("check index name %q: desired base %q, but filename base is %q", name, base, p)
 	}
 	return nil
 }
 
 // ParseIndexName pulls the index from a file name. Should not have path components.
-func ParseIndexName(name string) (prefix string, index uint64, err error) {
+func ParseIndexName(name string) (base string, index uint64, err error) {
 	groups := indexPattern.FindStringSubmatch(name)
 	if len(groups) == 0 {
 		return "", 0, fmt.Errorf("parse name: no match for %q", name)
 	}
-	prefix, idxStr := groups[1], groups[2]
+	idxStr, base := groups[1], groups[2]
 	idx, err := strconv.ParseUint(idxStr, 16, 64)
 	if err != nil {
 		return "", 0, fmt.Errorf("parse name: %w", err)
 	}
-	return prefix, idx, nil
+	return base, idx, nil
+}
+
+// CreateSnapshot creates a snapshot stuffer for writing.
+func CreateSnapshot(dir, base string, idx uint64) (*stuffedio.WALStuffer, error) {
+	baseName := IndexName(base, idx)
+	partialName := "partial." + baseName
+	name := filepath.Join(dir, partialName)
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+	w := stuffedio.NewStuffer(f).WAL()
+	w.RegisterClose(func() error {
+		if err := os.Rename(name, filepath.Join(dir, baseName)); err != nil {
+			return fmt.Errorf("create snapshot rename: %w", err)
+		}
+		return nil
+	})
+	return w, nil
 }
