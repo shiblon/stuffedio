@@ -4,9 +4,7 @@ package wal
 
 import (
 	"fmt"
-	"io"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,9 +85,10 @@ type WAL struct {
 	snapshotAdder Adder
 	journalPlayer Player
 
-	prevSize    int64                 // Nonzero when appending to an existing file, 0 otherwise.
-	nextIndex   uint64                // Keep track of what the next record's index should be.
-	currStuffer *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
+	currSize       int64                 // Current size of current journal file.
+	prevFinalIndex uint64                // Last index of previous journal file.
+	nextIndex      uint64                // Keep track of what the next record's index should be.
+	currStuffer    *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -204,24 +203,28 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 			}
 		}
 
+		// It's an error if we never got a final file name and there are names present.
+		if finalName == "" {
+			return nil, fmt.Errorf("open wal unexpected condition: no final journal name set when iterating over journal names %q", jNames)
+		}
+
 		// Compute the file size and number of records in the last journal.
 		finalSize = jUnstuffer.Consumed() - prevConsumed
 		finalCount = int(last - first + 1)
 		finalIndex = last
 	}
 
+	// Stats for the current journal file.
+	w.currSize = finalSize
+	w.prevFinalIndex = finalIndex
 	w.nextIndex = finalIndex + 1
 
-	if finalName == "" || finalCount > w.maxJournalIndices || finalSize > w.maxJournalBytes {
-		// No last file, or last file has too many indices or is too large in bytes.
-		f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalPrefix, w.nextIndex)))
-		if err != nil {
-			return fmt.Errorf("open wal create: %w", err)
+	if finalName == "" || w.timeToRotate() {
+		if err := w.rotate(); err != nil {
+			return nil, fmt.Errorf("open wal new journal: %w", err)
 		}
-		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
 	} else {
 		// Can append to last file found.
-		w.prevSize = finalSize
 		f, err := os.OpenFile(filepath.Join(w.dir, finalName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return fmt.Errorf("open wal for append: %w", err)
@@ -232,31 +235,67 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 	return w, nil
 }
 
-// WALStats returns the size and extreme record indices for non-corrupt records
-// in a stuffed WAL file. Fails if the underlying file is not an io.ReaderAt.
-func WALStats(f fs.File) (size int64, first, last uint64, err error) {
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("wal stats: %w", err)
+// Append sends another record to the journal, and can trigger rotation of underlying files.
+func (w *WAL) Append(b []byte) error {
+	if w.currStuffer == nil {
+		return fmt.Errorf("append: no current journal stuffer")
 	}
+	if err := w.rotateIfReady(); err != nil {
+		return fmt.Errorf("append rotate if ready: %v", err)
+	}
+	n, err := w.currStuffer.Append(w.nextIndex, b)
+	if err != nil {
+		return fmt.Errorf("append: %w", err)
+	}
+	w.currSize += n
+	w.nextIndex++
+	return nil
+}
 
-	if r, ok := f.(io.ReaderAt); ok {
-		uBackward := stuffedio.NewReverseUnstuffer(r, fi.Size()).WAL()
-		last, _, err = uBackward.Next()
-		if err != nil {
-			return 0, 0, 0, fmt.Errorf("wal stats, last: %w", err)
+// timeToRotate returns whether we are due for a rotation.
+func (w *WAL) timeToRotate() bool {
+	if w.currSize > w.maxJournalBytes {
+		return true
+	}
+	if int(w.nextIndex-w.prevFinalIndex) > w.maxJournalIndices {
+		return true
+	}
+	return false
+}
+
+// rotateIfReady checks whether it's time to rotate, then optionally rotates
+// the current journal file.
+func (w *WAL) rotateIfReady() error {
+	if !w.timeToRotate() {
+		return nil
+	}
+	if err := w.rotate(); err != nil {
+		return fmt.Errorf("rotate if ready: %w", err)
+	}
+	return nil
+}
+
+// rotate performs a file rotation, closing the current stuffer and opening a
+// new one over a new file, if possible.
+func (w *WAL) rotate() error {
+	// Close current.
+	if w.currStuffer != nil {
+		if err := w.currStuffer.Close(); err != nil {
+			return fmt.Errorf("rotate: %w", err)
 		}
-	} else {
-		log.Printf("Can't reverse iterate on %T, not a ReaderAt, falling back to slow forward iteration", f)
+		w.currStuffer = nil
+		w.prevFinalIndex = w.nextIndex - 1
 	}
-
-	uForward := stuffedio.NewUnstuffer(f).WAL()
-	first, _, err = uForward.Next()
+	// Open new.
+	f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalPrefix, w.nextIndex)))
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("wal stats, first: %w", err)
+		return fmt.Errorf("rotate: %w", err)
 	}
-
-	return fi.Size(), first, last, nil
+	w.currSize = 0
+	w.currStuffer = stuffedio.NewStuffer(f).WAL(
+		stuffedio.WithFirstIndex(w.nextIndex),
+	)
+	return nil
 }
 
 // IndexName returns a string for the given index value.
