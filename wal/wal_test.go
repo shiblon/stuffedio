@@ -59,7 +59,7 @@ func TestWAL_Snapshots(t *testing.T) {
 	func() {
 		var snapFound []string
 		w, err := Open(dir,
-			WithAllowAppend(true),
+			WithAllowWrite(true),
 			WithSnapshotAdder(func(b []byte) error {
 				snapFound = append(snapFound, string(b))
 				return nil
@@ -136,7 +136,7 @@ func TestWAL_ReadOnly(t *testing.T) {
 		t.Errorf("wal read only: empty append: expected error on append")
 	}
 
-	w, err = Open(dir, WithAllowAppend(true))
+	w, err = Open(dir, WithAllowWrite(true))
 	if err != nil {
 		t.Fatalf("WAL read only: writeable open: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestWAL_ReadOnly(t *testing.T) {
 
 	var found []string
 	w, err = Open(dir,
-		WithAllowAppend(false),
+		WithAllowWrite(false),
 		WithJournalPlayer(func(b []byte) error {
 			found = append(found, string(b))
 			return nil
@@ -181,7 +181,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 		// directory. See below for how to load things.
 		//
 		// We also force frequent rotation by severely limiting max counts.
-		w, err := Open(dir, WithMaxJournalIndices(2), WithAllowAppend(true))
+		w, err := Open(dir, WithMaxJournalIndices(2), WithAllowWrite(true))
 		if err != nil {
 			return fmt.Errorf("create empty WAL: %w", err)
 		}
@@ -225,7 +225,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 	if err := func() error {
 		w, err := Open(dir,
 			WithMaxJournalIndices(2),
-			WithAllowAppend(true),
+			WithAllowWrite(true),
 			WithJournalPlayer(func(b []byte) error {
 				readMsgs = append(readMsgs, string(b))
 				return nil

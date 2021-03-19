@@ -77,7 +77,7 @@ func WithMaxJournalIndices(m int) Option {
 	}
 }
 
-// WithAllowAppend lets the WAL go into "write" mode after it has been parsed.
+// WithAllowWrite lets the WAL go into "write" mode after it has been parsed.
 // The default is to be read-only, and to create errors when attempting to do
 // write operations on the file system. This makes it easy to not make
 // mistakes, for example, when trying to collect journals to make a new
@@ -85,9 +85,9 @@ func WithMaxJournalIndices(m int) Option {
 // created, then it can be reopened in write mode and it will know to load that
 // snapshot instead of replaying the entire set of journals. An empty snapshot
 // loader can be given in that case to speed the loading process.
-func WithAllowAppend(a bool) Option {
+func WithAllowWrite(a bool) Option {
 	return func(w *WAL) {
-		w.allowAppend = a
+		w.allowWrite = a
 	}
 }
 
@@ -111,7 +111,7 @@ type WAL struct {
 	maxJournalIndices int
 
 	allowEmptyAdder bool
-	allowAppend     bool
+	allowWrite      bool
 
 	snapshotAdder Loader
 	journalPlayer Loader
@@ -156,11 +156,13 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if len(sNames) != 0 {
 		latestSnapshot = sNames[len(sNames)-1]
 
-		// Move early snapshots to non-matching names. Can be collected later.
-		earlier := sNames[:len(sNames)-1]
-		for _, name := range earlier {
-			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
-				return nil, fmt.Errorf("open wal move early snapshots: %w", err)
+		if w.allowWrite {
+			// Move early snapshots to non-matching names. Can be collected later.
+			earlier := sNames[:len(sNames)-1]
+			for _, name := range earlier {
+				if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+					return nil, fmt.Errorf("open wal move early snapshots: %w", err)
+				}
 			}
 		}
 	}
@@ -174,9 +176,11 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	}
 
 	// Move early journals to non-matching names. Can be collected later.
-	for _, name := range jNames[:jStart] {
-		if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
-			return nil, fmt.Errorf("open wal move early journals: %w", err)
+	if w.allowWrite {
+		for _, name := range jNames[:jStart] {
+			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+				return nil, fmt.Errorf("open wal move early journals: %w", err)
+			}
 		}
 	}
 
@@ -271,7 +275,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		w.nextIndex = 1
 	}
 
-	if !w.allowAppend {
+	if !w.allowWrite {
 		// Read-only - don't open the last file for writing.
 		return w, nil
 	}
@@ -295,7 +299,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 
 // Append sends another record to the journal, and can trigger rotation of underlying files.
 func (w *WAL) Append(b []byte) error {
-	if !w.allowAppend {
+	if !w.allowWrite {
 		return fmt.Errorf("wal append: not opened for appending, read-only")
 	}
 	if w.currStuffer == nil {
@@ -348,7 +352,7 @@ func (w *WAL) timeToRotate() (yes bool) {
 // rotate performs a file rotation, closing the current stuffer and opening a
 // new one over a new file, if possible.
 func (w *WAL) rotate() error {
-	if !w.allowAppend {
+	if !w.allowWrite {
 		return fmt.Errorf("wal rotate: not opened for append, read-only")
 	}
 	defer func() {
