@@ -19,7 +19,7 @@ func ExampleStuffer() {
 	buf := new(bytes.Buffer)
 
 	w := NewStuffer(buf)
-	if err := w.Append([]byte("A very short message")); err != nil {
+	if _, err := w.Append([]byte("A very short message")); err != nil {
 		log.Fatalf("Error appending: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestStuffer_Append_one(t *testing.T) {
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
 		w := NewStuffer(buf)
-		if err := w.Append([]byte(test.write)); err != nil {
+		if _, err := w.Append([]byte(test.write)); err != nil {
 			t.Fatalf("Append_one %q: writing: %v", test.name, err)
 		}
 		if diff := cmp.Diff(test.raw, string(buf.Bytes())); diff != "" {
@@ -204,7 +204,7 @@ func TestStuffer_Append_multiple(t *testing.T) {
 		buf := new(bytes.Buffer)
 		w := NewStuffer(buf)
 		for _, val := range test.write {
-			if err := w.Append([]byte(val)); err != nil {
+			if _, err := w.Append([]byte(val)); err != nil {
 				t.Fatalf("Append_multiple %q: %v", test.name, err)
 			}
 		}
@@ -277,7 +277,7 @@ func TestUnstuffer_Next_corrupt(t *testing.T) {
 
 func TestUnstuffer_Consumed(t *testing.T) {
 	type entry struct {
-		rawLen int
+		rawLen int64
 		val    string
 	}
 
@@ -311,7 +311,7 @@ func TestUnstuffer_Consumed(t *testing.T) {
 		buf := new(bytes.Buffer)
 		w := NewStuffer(buf)
 		for i, e := range test.entries {
-			if err := w.Append([]byte(e.val)); err != nil {
+			if _, err := w.Append([]byte(e.val)); err != nil {
 				t.Fatalf("Consumed %q (%d): Error appending: %v", test.name, i, err)
 			}
 		}
@@ -320,7 +320,7 @@ func TestUnstuffer_Consumed(t *testing.T) {
 		if r.Consumed() != 0 {
 			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, r.Consumed())
 		}
-		totalConsumed := 0
+		totalConsumed := int64(0)
 		for i := 0; i < len(test.entries) && !r.Done(); i++ {
 			b, err := r.Next()
 			if err != nil {
@@ -441,7 +441,7 @@ func TestReverseUnstuffer_LongEntries(t *testing.T) {
 		buf := new(bytes.Buffer)
 		s := NewStuffer(buf)
 		for _, msg := range test.msgs {
-			if err := s.Append([]byte(msg)); err != nil {
+			if _, err := s.Append([]byte(msg)); err != nil {
 				t.Fatalf("ReverseUnstuffer long entries %q append: %v", test.name, err)
 			}
 		}
@@ -474,7 +474,7 @@ func ExampleReverseUnstuffer() {
 
 	s := NewStuffer(buf)
 	for _, msg := range msgs {
-		if err := s.Append([]byte(msg)); err != nil {
+		if _, err := s.Append([]byte(msg)); err != nil {
 			log.Fatalf("Error appending: %v", err)
 		}
 	}

@@ -23,6 +23,8 @@ type MultiUnstuffer struct {
 	readerIter UnstufferIterator
 
 	reader *Unstuffer
+
+	prevConsumed int64
 }
 
 // NewMultiUnstuffer creates a MultiUnstuffer from a slice of readers. These are
@@ -50,7 +52,8 @@ func (r *MultiUnstuffer) ensureUnstuffer() error {
 		if !r.reader.Done() {
 			return nil
 		}
-		// Exhausted, close it.
+		// Exhausted, close it and remember how much it consumed.
+		r.prevConsumed += r.reader.Consumed()
 		r.reader.Close()
 		r.reader = nil
 	}
@@ -74,12 +77,24 @@ func (r *MultiUnstuffer) ensureUnstuffer() error {
 	return nil
 }
 
+// Consumed returns the total number of bytes consumed thus far.
+func (r *MultiUnstuffer) Consumed() int64 {
+	if r.reader != nil {
+		return r.prevConsumed + r.reader.Consumed()
+	}
+	return r.prevConsumed
+}
+
 // Next gets the next record for these readers.
 func (r *MultiUnstuffer) Next() ([]byte, error) {
 	if err := r.ensureUnstuffer(); err != nil {
 		return nil, fmt.Errorf("multi next: %w", err)
 	}
-	return r.reader.Next()
+	b, err := r.reader.Next()
+	if err != nil {
+		return nil, fmt.Errorf("multi next: %w", err)
+	}
+	return b, nil
 }
 
 // Done returns whether this multi reader has exhausted all underlying readers.
@@ -159,7 +174,8 @@ func (r *FilesUnstufferIterator) Next() (*Unstuffer, error) {
 		r.file.Close()
 	}
 
-	f, err := r.fsys.Open(r.names[r.nextName])
+	fname := r.names[r.nextName]
+	f, err := r.fsys.Open(fname)
 	if err != nil {
 		return nil, fmt.Errorf("next reader file: %w", err)
 	}

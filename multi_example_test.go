@@ -17,7 +17,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 	defer w.Close()
 
 	for i := start; i < end; i++ {
-		if err := w.Append(i, []byte(fmt.Sprintf("Record with number %d", i))); err != nil {
+		if _, err := w.Append(i, []byte(fmt.Sprintf("Record with number %d", i))); err != nil {
 			log.Fatalf("Error appending: %v", err)
 		}
 	}

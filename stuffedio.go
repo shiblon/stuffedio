@@ -32,7 +32,7 @@
 //   }
 //
 //   for _, msg := range msgs {
-//     if err := s.Append(msg); err != nil {
+//     if _, err := s.Append(msg); err != nil {
 //       log.Fatalf("Error appending: %v", err)
 //     }
 //   }
@@ -159,7 +159,7 @@
 //	}
 //
 //	for i, msg := range msgs {
-//		if err := s.Append(uint64(i)+1, []byte(msg)); err != nil {
+//		if _, err := s.Append(uint64(i)+1, []byte(msg)); err != nil {
 //			log.Fatalf("Append error: %v", err)
 //		}
 //	}
@@ -253,10 +253,11 @@ func findReserved(p []byte, end int) (int, bool) {
 }
 
 // Append adds a record to the end of the underlying writer. It encodes it
-// using word stuffing.
-func (s *Stuffer) Append(p []byte) error {
+// using word stuffing. It returns the actual number of bytes written, which
+// will always be slightly more than requested if there is no error.
+func (s *Stuffer) Append(p []byte) (int, error) {
 	if len(p) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Always start with the delimiter.
@@ -271,7 +272,7 @@ func (s *Stuffer) Append(p []byte) error {
 	rec := append(make([]byte, 0, 1+end), byte(end))
 	rec = append(rec, p[:end]...)
 	if _, err := buf.Write(rec); err != nil {
-		return fmt.Errorf("write rec: %w", err)
+		return 0, fmt.Errorf("write rec: %w", err)
 	}
 
 	// Set the starting point for the next rounds. If we found a delimiter, we
@@ -293,7 +294,7 @@ func (s *Stuffer) Append(p []byte) error {
 		rec := append(make([]byte, 0, 2+end), byte(len1), byte(len2))
 		rec = append(rec, p[:end]...)
 		if _, err := buf.Write(rec); err != nil {
-			return fmt.Errorf("write rec: %w", err)
+			return 0, fmt.Errorf("write rec: %w", err)
 		}
 
 		if foundReserved {
@@ -307,13 +308,14 @@ func (s *Stuffer) Append(p []byte) error {
 	// non-delimiter bytes, which is less than the record max).
 	if foundReserved {
 		if _, err := buf.Write([]byte{0, 0}); err != nil {
-			return fmt.Errorf("write rec: %w", err)
+			return 0, fmt.Errorf("write rec: %w", err)
 		}
 	}
+	size := buf.Len()
 	if _, err := io.Copy(s.dest, buf); err != nil {
-		return fmt.Errorf("write rec: %w", err)
+		return 0, fmt.Errorf("write rec: %w", err)
 	}
-	return nil
+	return size, nil
 }
 
 // Close cleans up the underlying streams. If the underlying stream is also an io.Closer, it will close it.
@@ -328,10 +330,10 @@ func (s *Stuffer) Close() error {
 type Unstuffer struct {
 	src      io.Reader
 	buf      []byte
-	consumed int  // number of bytes actually consumed by the decoder.
-	pos      int  // position in the unused read buffer.
-	end      int  // one past the end of unused data.
-	ended    bool // EOF reached, don't read again.
+	consumed int64 // number of bytes actually consumed by the decoder.
+	pos      int   // position in the unused read buffer.
+	end      int   // one past the end of unused data.
+	ended    bool  // EOF reached, don't read again.
 }
 
 // NewUnstuffer creates an Unstuffer from the given src, which is assumed to be
@@ -381,7 +383,7 @@ func (u *Unstuffer) fillBuf() error {
 // Silently fails to move all the way if it encounters end first.
 func (u *Unstuffer) advance(n int) {
 	u.pos += n
-	u.consumed += n
+	u.consumed += int64(n)
 }
 
 // bufLen indicates how many bytes are available in the buffer.
@@ -395,7 +397,7 @@ func (u *Unstuffer) bufData() []byte {
 }
 
 // Consumed returns the number of bytes consumed from the underlying stream (not read, used).
-func (u *Unstuffer) Consumed() int {
+func (u *Unstuffer) Consumed() int64 {
 	return u.consumed
 }
 
