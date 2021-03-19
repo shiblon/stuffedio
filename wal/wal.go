@@ -261,6 +261,7 @@ func (w *WAL) Append(b []byte) error {
 		return fmt.Errorf("append: %w", err)
 	}
 	w.currSize += int64(n)
+	w.currCount++
 	w.nextIndex++
 	return nil
 }
@@ -276,11 +277,11 @@ func (w *WAL) Close() error {
 }
 
 // timeToRotate returns whether we are due for a rotation.
-func (w *WAL) timeToRotate() bool {
-	if w.currSize > w.maxJournalBytes {
+func (w *WAL) timeToRotate() (yes bool) {
+	if w.currSize >= w.maxJournalBytes {
 		return true
 	}
-	if w.currCount > w.maxJournalIndices {
+	if w.currCount >= w.maxJournalIndices {
 		return true
 	}
 	return false
