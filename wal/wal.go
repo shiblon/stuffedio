@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 const (
 	DefaultJournalPrefix  = "j"
 	DefaultSnapshotPrefix = "s"
+	DefaultMaxIndices     = 10 * 1 << 10 // 10Ki
+	DefaultMaxBytes       = 10 * 1 << 20 // 10Mi
 )
 
 var (
@@ -55,16 +58,38 @@ func WithJournalPlayer(p Player) Option {
 	}
 }
 
+// WithMaxJournalBytes sets the maximum number of bytes before a journal is rotated.
+// Default is DefaultMaxBytes.
+func WithMaxJournalBytes(m int64) Option {
+	return func(w *WAL) {
+		w.maxJournalBytes = m
+	}
+}
+
+// WithMaxJournalIndices sets the maximum number of indices in a journal file
+// before it must be rotated.
+func WithMaxJournalIndices(m int) Option {
+	return func(w *WAL) {
+		w.maxJournalIndices = m
+	}
+}
+
 // WAL implements a write-ahead logger capable of replaying snapshots and
 // journals, setting up a writer for appending to journals and rotating them
 // when full, etc.
 type WAL struct {
-	dir            string
-	journalPrefix  string
-	snapshotPrefix string
+	dir               string
+	journalPrefix     string
+	snapshotPrefix    string
+	maxJournalBytes   int64
+	maxJournalIndices int
 
 	snapshotAdder Adder
 	journalPlayer Player
+
+	prevSize    int64                 // Nonzero when appending to an existing file, 0 otherwise.
+	nextIndex   uint64                // Keep track of what the next record's index should be.
+	currStuffer *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -75,8 +100,10 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		snapshotAdder: loader,
 		journalPlayer: replayer,
 
-		journalPrefix:  DefaultJournalPrefix,
-		snapshotPrefix: DefaultSnapshotPrefix,
+		journalPrefix:     DefaultJournalPrefix,
+		maxJournalBytes:   DefaultMaxBytes,
+		maxJournalIndices: DefaultMaxIndices,
+		snapshotPrefix:    DefaultSnapshotPrefix,
 	}
 
 	for _, opt := range opts {
@@ -102,7 +129,7 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		latestSnapshot = sNames[len(sNames)-1]
 	}
 
-	// TODO: clean up any non-latest snapshots?
+	// TODO: clean up any non-latest snapshots? Move to a "clean up later" location?
 
 	jStart := 0
 	for i, name := range jNames {
@@ -128,26 +155,35 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 	}
 
 	jNames = jNames[jStart:]
-	var (
-		finalSize  int64
-		finalFirst uint64
-		finalLast  uint64
 
-		prevConsumed int
-		newFile      bool
+	var (
+		finalSize  int64  // last file's size
+		finalIndex uint64 // last file's last index
+		finalCount int    // last file's number of valid records
+		finalName  string // last file's name
 	)
 	if len(jNames) != 0 {
+		var (
+			first uint64
+			last  uint64
+
+			prevConsumed int64
+			newFileName  string
+		)
 		filesIter := stuffedio.NewFileUnstufferIterator(fsys, jNames)
 		jUnstuffer := stuffedio.NewMultiUnstufferIter(filesIter)
 		jWALReader := stuffedio.NewWALUnstuffer(jUnstuffer)
+
+		defer jWALReader.Close()
 
 		// Keep track of how much was consumed when the previous file
 		// finished, so we can calculate the final file's size.
 		// Also track the expected index when a new file starts (which will be
 		// the previous one-past-end index).
-		filesIter.RegisterOnStart(func(_ fs.File) error {
+		filesIter.RegisterOnStart(func(f fs.File) error {
 			prevConsumed = jUnstuffer.Consumed()
-			newFile = true // signal that the next successful "Next" call has a good index.
+			newFileName = f.Name() // save for quick index check
+			finalName = f.Name()   // save for much later
 		})
 
 		for !jWALReader.Done() {
@@ -155,22 +191,43 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 			if err != nil {
 				return nil, fmt.Errorf("open wal journal next (%d): %w", idx, err)
 			}
-			if newFile {
-				newFile = false
-				finalFirst = idx
+			if newFileName {
+				if err := CheckIndexName(newFileName, w.journalPrefix, idx); err != nil {
+					return nil, fmt.Errorf("open wal check journal name: %w", err)
+				}
+				first = idx      // remember the first index for this file.
+				newFileName = "" // don't remember it next time around.
 			}
-			finalLast = idx
+			last = idx
 			if err := w.journalPlayer.Play(b); err != nil {
 				return nil, fmt.Errorf("open wal journal play (%d): %w", idx, err)
 			}
 		}
 
+		// Compute the file size and number of records in the last journal.
 		finalSize = jUnstuffer.Consumed() - prevConsumed
+		finalCount = int(last - first + 1)
+		finalIndex = last
 	}
 
-	// TODO:
-	// - use counts and size to determine whether we should create a new journal or not.
-	// - get ready to write.
+	w.nextIndex = finalIndex + 1
+
+	if finalName == "" || finalCount > w.maxJournalIndices || finalSize > w.maxJournalBytes {
+		// No last file, or last file has too many indices or is too large in bytes.
+		f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalPrefix, w.nextIndex)))
+		if err != nil {
+			return fmt.Errorf("open wal create: %w", err)
+		}
+		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
+	} else {
+		// Can append to last file found.
+		w.prevSize = finalSize
+		f, err := os.OpenFile(filepath.Join(w.dir, finalName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("open wal for append: %w", err)
+		}
+		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
+	}
 
 	return w, nil
 }
@@ -205,6 +262,21 @@ func WALStats(f fs.File) (size int64, first, last uint64, err error) {
 // IndexName returns a string for the given index value.
 func IndexName(prefix string, idx uint64) string {
 	return fmt.Sprintf("%s-%016x", prefix, idx)
+}
+
+// CheckIndexName checkes that the given file name contains the right prefix and index.
+func CheckIndexName(name, prefix string, index uint64) error {
+	p, i, err := ParseIndexName(name)
+	if err != nil {
+		return fmt.Errorf("check index name %q: %w", name, err)
+	}
+	if i != index {
+		return fmt.Errorf("check index name %q: want index %d, got %d", name, index, i)
+	}
+	if p != prefix {
+		return fmt.Errorf("check index name %q: want prefix %q, got %q", name, prefix, p)
+	}
+	return nil
 }
 
 // ParseIndexName pulls the index from a file name. Should not have path components.

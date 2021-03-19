@@ -169,7 +169,7 @@ func (r *WALUnstuffer) Close() error {
 // AppendCloser is an interface for appending records to a stream.
 type AppendCloser interface {
 	io.Closer
-	Append([]byte) error
+	Append([]byte) (int, error)
 }
 
 // WALStuffer implements a write-ahead log around an AppendCloser (like a
@@ -207,12 +207,12 @@ func NewWALStuffer(a AppendCloser, opts ...WALStufferOption) *WALStuffer {
 }
 
 // Append writes a new log entry into the WAL.
-func (w *WALStuffer) Append(index uint64, p []byte) error {
+func (w *WALStuffer) Append(index uint64, p []byte) (int, error) {
 	if index == 0 {
-		return fmt.Errorf("index 0 is invalid as a starting index for a write-ahead log")
+		return 0, fmt.Errorf("index 0 is invalid as a starting index for a write-ahead log")
 	}
 	if w.nextIndex != 0 && index != w.nextIndex {
-		return fmt.Errorf("expected next index in sequence %d, got %d", w.nextIndex, index)
+		return 0, fmt.Errorf("expected next index in sequence %d, got %d", w.nextIndex, index)
 	}
 	w.nextIndex = index + 1
 
@@ -222,10 +222,11 @@ func (w *WALStuffer) Append(index uint64, p []byte) error {
 	binary.LittleEndian.PutUint32(entry[8:12], crc)
 	copy(entry[12:], p)
 
-	if err := w.dest.Append(entry); err != nil {
-		return fmt.Errorf("wal append: %w", err)
+	n, err := w.dest.Append(entry)
+	if err != nil {
+		return 0, fmt.Errorf("wal append: %w", err)
 	}
-	return nil
+	return n, nil
 }
 
 // Close closes underlying implementations if they are io.Closers.

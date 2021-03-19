@@ -38,7 +38,7 @@ func TestMultiUnstuffer_Consumed(t *testing.T) {
 		for _, msg := range test.msgs {
 			buf := new(bytes.Buffer)
 			s := NewStuffer(buf)
-			if err := s.Append([]byte(msg)); err != nil {
+			if _, err := s.Append([]byte(msg)); err != nil {
 				t.Fatalf("%q: error appending: %v", test.name, err)
 			}
 			components = append(components, NewUnstuffer(buf))

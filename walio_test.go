@@ -22,7 +22,7 @@ func ExampleReadWrite() {
 	}
 
 	for i, msg := range msgs {
-		if err := w.Append(uint64(i)+1, []byte(msg)); err != nil {
+		if _, err := w.Append(uint64(i)+1, []byte(msg)); err != nil {
 			log.Fatalf("Append error: %v", err)
 		}
 	}
@@ -135,7 +135,7 @@ func TestWAL(t *testing.T) {
 
 		var writeErr error
 		for _, entry := range test.entries {
-			if err := w.Append(entry.i, []byte(entry.val)); err != nil {
+			if _, err := w.Append(entry.i, []byte(entry.val)); err != nil {
 				writeErr = err
 			}
 		}
@@ -212,7 +212,7 @@ func TestWAL_descending(t *testing.T) {
 
 		s := NewStuffer(buf).WAL()
 		for i, val := range test.vals {
-			if err := s.Append(uint64(i+1), []byte(val)); err != nil {
+			if _, err := s.Append(uint64(i+1), []byte(val)); err != nil {
 				t.Fatalf("WAL descending %q append: %v", test.name, err)
 			}
 		}
