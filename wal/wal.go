@@ -101,6 +101,16 @@ func WithAllowEmptySnapshotAdder(a bool) Option {
 	}
 }
 
+// WithAllowEmptyJournalPlayer indicates that journals are to be scanned, not processed.
+// This is a safety measure to avoid default behavior being unwanted: usually
+// you want to process journal entries, but sometimes there is good reason to
+// simply scan for the proper index and start appending.
+func WithAllowEmptyJournalPlayer(a bool) Option {
+	return func(w *WAL) {
+		w.allowEmptyPlayer = a
+	}
+}
+
 // WAL implements a write-ahead logger capable of replaying snapshots and
 // journals, setting up a writer for appending to journals and rotating them
 // when full, etc.
@@ -111,8 +121,9 @@ type WAL struct {
 	maxJournalBytes   int64
 	maxJournalIndices int
 
-	allowEmptyAdder bool
-	allowWrite      bool
+	allowEmptyAdder  bool
+	allowEmptyPlayer bool
+	allowWrite       bool
 
 	snapshotAdder Loader
 	journalPlayer Loader
@@ -161,6 +172,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		base, idx, err := ParseIndexName(de.Name())
 		if err != nil {
 			log.Printf("Unrecognized file pattern in %q, skipping", de.Name())
+			continue
 		}
 		switch base {
 		case w.journalBase:
@@ -194,7 +206,8 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		}
 	}
 
-	jStart := 0
+	// Default to no journals.
+	jStart := len(journalEntries)
 	for i, entry := range journalEntries {
 		if entry.i > snapshotEntry.i {
 			jStart = i
@@ -258,7 +271,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	// So we implement some of the loops here by hand instead.
 	for _, name := range jNames {
 		w.currCount = 0
-		if w.journalPlayer == nil {
+		if !w.allowEmptyPlayer && w.journalPlayer == nil {
 			return nil, fmt.Errorf("open wal: journal files found but no journal player option given")
 		}
 		f, err := fsys.Open(name)
@@ -294,8 +307,10 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 					return nil, fmt.Errorf("open wal check: %w", err)
 				}
 			}
-			if err := w.journalPlayer(b); err != nil {
-				return nil, fmt.Errorf("open wal play: %w", err)
+			if w.journalPlayer != nil {
+				if err := w.journalPlayer(b); err != nil {
+					return nil, fmt.Errorf("open wal play: %w", err)
+				}
 			}
 		}
 	}
