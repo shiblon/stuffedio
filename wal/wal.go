@@ -77,6 +77,29 @@ func WithMaxJournalIndices(m int) Option {
 	}
 }
 
+// WithAllowAppend lets the WAL go into "write" mode after it has been parsed.
+// The default is to be read-only, and to create errors when attempting to do
+// write operations on the file system. This makes it easy to not make
+// mistakes, for example, when trying to collect journals to make a new
+// snapshot. The WAL can be opened in read-only mode, a snapshot can be
+// created, then it can be reopened in write mode and it will know to load that
+// snapshot instead of replaying the entire set of journals. An empty snapshot
+// loader can be given in that case to speed the loading process.
+func WithAllowAppend(a bool) Option {
+	return func(w *WAL) {
+		w.allowAppend = a
+	}
+}
+
+// WithAllowEmptySnapshotAdder indicates that not loading a snapshot is
+// actually desired. This is to prevent mistakes: usually a snapshot adder is
+// wanted, if there is a snapshot to be added.
+func WithAllowEmptySnapshotAdder(a bool) Option {
+	return func(w *WAL) {
+		w.allowEmptyAdder = a
+	}
+}
+
 // WAL implements a write-ahead logger capable of replaying snapshots and
 // journals, setting up a writer for appending to journals and rotating them
 // when full, etc.
@@ -86,6 +109,9 @@ type WAL struct {
 	snapshotPrefix    string
 	maxJournalBytes   int64
 	maxJournalIndices int
+
+	allowEmptyAdder bool
+	allowAppend     bool
 
 	snapshotAdder Loader
 	journalPlayer Loader
@@ -126,7 +152,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	}
 	sort.Strings(jNames)
 
-	var latestSnapshot string
+	latestSnapshot := ""
 	if len(sNames) != 0 {
 		latestSnapshot = sNames[len(sNames)-1]
 
@@ -155,31 +181,47 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	}
 
 	if latestSnapshot != "" {
-		if w.snapshotAdder == nil {
+		// Only allow snapshot load to be skipped if explicitly asked.
+		if !w.allowEmptyAdder && w.snapshotAdder == nil {
 			return nil, fmt.Errorf("open wal: snapshot found but no snapshot adder option given")
 		}
-		f, err := fsys.Open(latestSnapshot)
-		if err != nil {
-			return nil, fmt.Errorf("open wal open snapshot: %w", err)
-		}
-		sReader := stuffedio.NewUnstuffer(f).WAL()
-		for !sReader.Done() {
-			idx, b, err := sReader.Next()
+		// Skip reading snapshot if requested.
+		if w.snapshotAdder != nil {
+			f, err := fsys.Open(latestSnapshot)
 			if err != nil {
-				return nil, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
+				return nil, fmt.Errorf("open wal open snapshot: %w", err)
 			}
-			if err := w.snapshotAdder(b); err != nil {
-				return nil, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
+			u := stuffedio.NewUnstuffer(f).WAL()
+			for !u.Done() {
+				idx, b, err := u.Next()
+				if err != nil {
+					return nil, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
+				}
+				if err := w.snapshotAdder(b); err != nil {
+					return nil, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
+				}
 			}
 		}
 	}
 
 	jNames = jNames[jStart:]
 
+	// If we have a snapshot, then it is expected that the next journal file in
+	// line has a name that is exactly 1 more than the index in the snapshot
+	// name. Thus, the snapshot is named after the most recent journal's final
+	// good index.
+	w.nextIndex = 0
+	if latestSnapshot != "" {
+		_, idx, err := ParseIndexName(latestSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("open wal snapshot parse: %w", err)
+		}
+		w.nextIndex = idx + 1
+	}
+
 	// Note that we don't use the files iterator and multi unstuffer because
 	// we need filenames all the way along the process, to check that indices match.
 	// So we implement some of the loops here by hand instead.
-	w.nextIndex = 0
 	for _, name := range jNames {
 		w.currCount = 0
 		if w.journalPlayer == nil {
@@ -229,6 +271,11 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		w.nextIndex = 1
 	}
 
+	if !w.allowAppend {
+		// Read-only - don't open the last file for writing.
+		return w, nil
+	}
+
 	if len(jNames) == 0 || w.timeToRotate() {
 		if err := w.rotate(); err != nil {
 			return nil, fmt.Errorf("open wal new journal: %w", err)
@@ -248,6 +295,9 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 
 // Append sends another record to the journal, and can trigger rotation of underlying files.
 func (w *WAL) Append(b []byte) error {
+	if !w.allowAppend {
+		return fmt.Errorf("wal append: not opened for appending, read-only")
+	}
 	if w.currStuffer == nil {
 		return fmt.Errorf("wal append: no current journal stuffer")
 	}
@@ -264,6 +314,14 @@ func (w *WAL) Append(b []byte) error {
 	w.currCount++
 	w.nextIndex++
 	return nil
+}
+
+// CurrIndex returns index number for the most recently read (or written) journal entry.
+func (w *WAL) CurrIndex() uint64 {
+	if w.nextIndex == 0 {
+		return 0
+	}
+	return w.nextIndex - 1
 }
 
 // Close cleans up any open resources.
@@ -290,6 +348,9 @@ func (w *WAL) timeToRotate() (yes bool) {
 // rotate performs a file rotation, closing the current stuffer and opening a
 // new one over a new file, if possible.
 func (w *WAL) rotate() error {
+	if !w.allowAppend {
+		return fmt.Errorf("wal rotate: not opened for append, read-only")
+	}
 	defer func() {
 		w.currCount = 0
 		w.currSize = 0

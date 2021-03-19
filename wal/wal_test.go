@@ -8,6 +8,53 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+func mustTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "waltest-")
+	if err != nil {
+		t.Fatalf("Create temp dir: %v", err)
+	}
+	return dir
+}
+
+func TestWAL_ReadOnly(t *testing.T) {
+	dir := mustTempDir(t)
+
+	w, err := Open(dir)
+	if err != nil {
+		t.Fatalf("wal read only: empty open: %v", err)
+	}
+
+	if err := w.Append([]byte("hello")); err == nil {
+		t.Errorf("wal read only: empty append: expected error on append")
+	}
+
+	w, err = Open(dir, WithAllowAppend(true))
+	if err != nil {
+		t.Fatalf("wal read only: writeable open: %v", err)
+	}
+	if err := w.Append([]byte("hello")); err != nil {
+		t.Errorf("wal read only: writeable append: %v", err)
+	}
+	w.Close()
+
+	var found []string
+	w, err = Open(dir,
+		WithAllowAppend(false),
+		WithJournalPlayer(func(b []byte) error {
+			found = append(found, string(b))
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("wal read only: non-empty open: %v", err)
+	}
+	want := []string{"hello"}
+	if diff := cmp.Diff(want, found); diff != "" {
+		t.Fatalf("wal read only: non-empty read unexpected diff (-want +got):\n%v", diff)
+	}
+}
+
 func TestWAL_JournalOnly(t *testing.T) {
 	msgs := []string{
 		"Message 1",
@@ -17,10 +64,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 		"Message 5",
 	}
 
-	dir, err := os.MkdirTemp("", "waltest-")
-	if err != nil {
-		t.Fatalf("Create temp dir: %v", err)
-	}
+	dir := mustTempDir(t)
 
 	// Create a new journal inside a function (so we can defer closing it).
 	if err := func() error {
@@ -29,7 +73,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 		// directory. See below for how to load things.
 		//
 		// We also force frequent rotation by severely limiting max counts.
-		w, err := Open(dir, WithMaxJournalIndices(2))
+		w, err := Open(dir, WithMaxJournalIndices(2), WithAllowAppend(true))
 		if err != nil {
 			return fmt.Errorf("create empty WAL: %w", err)
 		}
@@ -73,6 +117,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 	if err := func() error {
 		w, err := Open(dir,
 			WithMaxJournalIndices(2),
+			WithAllowAppend(true),
 			WithJournalPlayer(func(b []byte) error {
 				readMsgs = append(readMsgs, string(b))
 				return nil
