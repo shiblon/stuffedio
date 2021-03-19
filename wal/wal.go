@@ -25,6 +25,9 @@ var (
 	indexPattern = regexp.MustCompile(`^([^.]+)-([a-fA-F0-9]+)$`)
 )
 
+// Loader is a function type called by snapshot item loads and journal entry replay.
+type Loader func([]byte) error
+
 // Option describes a WAL creation option.
 type Option func(*WAL)
 
@@ -44,7 +47,7 @@ func WithSnapshotPrefix(p string) Option {
 
 // WithSnapshotAdder sets the record adder for all snapshot records. Clients
 // provide one of these to allow snapshots to be loaded.
-func WithSnapshotAdder(a Adder) Option {
+func WithSnapshotAdder(a Loader) Option {
 	return func(w *WAL) {
 		w.snapshotAdder = a
 	}
@@ -52,7 +55,7 @@ func WithSnapshotAdder(a Adder) Option {
 
 // WithJournalPlayer sets the journal player for all journal records after the
 // latest snapshot. Clients provide this to allow journals to be replayed.
-func WithJournalPlayer(p Player) Option {
+func WithJournalPlayer(p Loader) Option {
 	return func(w *WAL) {
 		w.journalPlayer = p
 	}
@@ -84,8 +87,8 @@ type WAL struct {
 	maxJournalBytes   int64
 	maxJournalIndices int
 
-	snapshotAdder Adder
-	journalPlayer Player
+	snapshotAdder Loader
+	journalPlayer Loader
 
 	currSize    int64                 // Current size of current journal file.
 	currCount   int                   // Current number of indices in current journal file.
@@ -95,11 +98,9 @@ type WAL struct {
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
 // that can be appended to over time.
-func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, error) {
+func Open(dir string, opts ...Option) (*WAL, error) {
 	w := &WAL{
-		dir:           dir,
-		snapshotAdder: loader,
-		journalPlayer: replayer,
+		dir: dir,
 
 		journalPrefix:     DefaultJournalPrefix,
 		maxJournalBytes:   DefaultMaxBytes,
@@ -156,7 +157,7 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 			if err != nil {
 				return nil, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
 			}
-			if err := w.snapshotAdder.Add(b); err != nil {
+			if err := w.snapshotAdder(b); err != nil {
 				return nil, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
 			}
 		}
@@ -208,7 +209,7 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 				newFileName = "" // don't remember it next time around.
 			}
 			lastFinal = idx
-			if err := w.journalPlayer.Play(b); err != nil {
+			if err := w.journalPlayer(b); err != nil {
 				return nil, fmt.Errorf("open wal journal play (%d): %w", idx, err)
 			}
 		}
@@ -264,6 +265,16 @@ func (w *WAL) Append(b []byte) error {
 	return nil
 }
 
+// Close cleans up any open resources.
+func (w *WAL) Close() error {
+	if w.currStuffer != nil {
+		err := w.currStuffer.Close()
+		w.currStuffer = nil
+		return err
+	}
+	return nil
+}
+
 // timeToRotate returns whether we are due for a rotation.
 func (w *WAL) timeToRotate() bool {
 	if w.currSize > w.maxJournalBytes {
@@ -284,9 +295,9 @@ func (w *WAL) rotate() error {
 	}()
 	// Close current.
 	if w.currStuffer != nil {
-		s := w.currStuffer
+		err := w.currStuffer.Close()
 		w.currStuffer = nil
-		if err := s.Close(); err != nil {
+		if err != nil {
 			return fmt.Errorf("rotate: %w", err)
 		}
 	}
@@ -333,19 +344,4 @@ func ParseIndexName(name string) (prefix string, index uint64, err error) {
 		return "", 0, fmt.Errorf("parse name: %w", err)
 	}
 	return prefix, idx, nil
-}
-
-// Adder should be passed in for snapshotting. It receives one Add call
-// for every record in the snapshot. If Add returns an error, the snapshot
-// process will halt and the WAL will stop trying to load.
-type Adder interface {
-	Add([]byte) error
-}
-
-// Player is passed into a new WAL to receive play events as journal
-// entries are processed. This allows clients to implement the actual journal
-// replay logic given valid bytes from the journal. Errors cause loading to
-// stop and fail.
-type Player interface {
-	Play([]byte) error
 }
