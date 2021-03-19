@@ -143,6 +143,9 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 	// TODO: clean up any journal files before jStart? Move them to a "please collect me" location?
 
 	if latestSnapshot != "" {
+		if w.snapshotAdder == nil {
+			return nil, fmt.Errorf("open wal: snapshot found but no snapshot adder option given")
+		}
 		f, err := fsys.Open(latestSnapshot)
 		if err != nil {
 			return nil, fmt.Errorf("open wal open snapshot: %w", err)
@@ -168,6 +171,9 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		finalName string // last file's name
 	)
 	if len(jNames) != 0 {
+		if w.journalPlayer == nil {
+			return nil, fmt.Errorf("open wal: journal files found but no journal player option given")
+		}
 		var (
 			prevConsumed int64
 			newFileName  string
