@@ -165,83 +165,72 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 
 	jNames = jNames[jStart:]
 
-	var (
-		finalSize int64  // last file's size
-		lastStart uint64 // last start index
-		lastFinal uint64 // last final index
-		finalName string // last file's name
-	)
-	if len(jNames) != 0 {
+	// Note that we don't use the files iterator and multi unstuffer because
+	// we need filenames all the way along the process, to check that indices match.
+	// So we implement some of the loops here by hand instead.
+	w.nextIndex = 0
+	for _, name := range jNames {
+		w.currCount = 0
 		if w.journalPlayer == nil {
 			return nil, fmt.Errorf("open wal: journal files found but no journal player option given")
 		}
-		var (
-			prevConsumed int64
-			newFileName  string
-		)
-		filesIter := stuffedio.NewFilesUnstufferIterator(fsys, jNames)
-		jUnstuffer := stuffedio.NewMultiUnstufferIter(filesIter)
-		jWALReader := stuffedio.NewWALUnstuffer(jUnstuffer)
+		f, err := fsys.Open(name)
+		if err != nil {
+			return nil, fmt.Errorf("open wal file: %w", err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("open wal stat: %w", err)
+		}
+		w.currSize = fi.Size()
 
-		defer jWALReader.Close()
+		u := stuffedio.NewUnstuffer(f).WAL()
+		defer u.Close()
 
-		// Keep track of how much was consumed when the previous file
-		// finished, so we can calculate the final file's size.
-		// Also track the expected index when a new file starts (which will be
-		// the previous one-past-end index).
-		filesIter.RegisterOnStart(func(name string, f fs.File) error {
-			prevConsumed = jUnstuffer.Consumed()
-			newFileName = name // save for quick index check
-			finalName = name   // save for much later
-			return nil
-		})
-
-		for !jWALReader.Done() {
-			idx, b, err := jWALReader.Next()
+		checked := false
+		for !u.Done() {
+			idx, b, err := u.Next()
 			if err != nil {
-				return nil, fmt.Errorf("open wal journal next (%d): %w", idx, err)
+				return nil, fmt.Errorf("open wal next: %w", err)
 			}
-			if newFileName != "" {
-				if err := CheckIndexName(newFileName, w.journalPrefix, idx); err != nil {
-					return nil, fmt.Errorf("open wal check journal name: %w", err)
+			if w.nextIndex == 0 {
+				w.nextIndex = idx
+			}
+			if w.nextIndex != idx {
+				return nil, fmt.Errorf("open wal next: want index %d, got %d", w.nextIndex, idx)
+			}
+			w.nextIndex++
+			w.currCount++
+			if !checked {
+				checked = true
+				if err := CheckIndexName(name, w.journalPrefix, idx); err != nil {
+					return nil, fmt.Errorf("open wal check: %w", err)
 				}
-				lastStart = idx  // remember the first index for this file.
-				newFileName = "" // don't remember it next time around.
 			}
-			lastFinal = idx
 			if err := w.journalPlayer(b); err != nil {
-				return nil, fmt.Errorf("open wal journal play (%d): %w", idx, err)
+				return nil, fmt.Errorf("open wal play: %w", err)
 			}
 		}
-
-		// It's an error if we never got a final file name and there are names present.
-		if finalName == "" {
-			return nil, fmt.Errorf("open wal unexpected condition: no final journal name set when iterating over journal names %q", jNames)
-		}
-
-		// Compute the file size and number of records in the last journal.
-		finalSize = jUnstuffer.Consumed() - prevConsumed
 	}
 
-	// Stats for the current journal file.
-	w.currSize = finalSize
-	if lastStart != 0 && lastFinal >= lastStart {
-		w.currCount = int(lastFinal - lastStart + 1)
+	// If nothing was read, set up for a correct first index.
+	if w.nextIndex == 0 {
+		w.nextIndex = 1
 	}
-	w.nextIndex = lastFinal + 1
 
-	if finalName == "" || w.timeToRotate() {
+	if len(jNames) == 0 || w.timeToRotate() {
 		if err := w.rotate(); err != nil {
 			return nil, fmt.Errorf("open wal new journal: %w", err)
 		}
-	} else {
-		// Can append to last file found.
-		f, err := os.OpenFile(filepath.Join(w.dir, finalName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, fmt.Errorf("open wal for append: %w", err)
-		}
-		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
+		return w, nil
 	}
+
+	// Room left in last file, allow append there.
+	f, err := os.OpenFile(filepath.Join(w.dir, jNames[len(jNames)-1]), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open wal for append: %w", err)
+	}
+	w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
 
 	return w, nil
 }
@@ -249,7 +238,7 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 // Append sends another record to the journal, and can trigger rotation of underlying files.
 func (w *WAL) Append(b []byte) error {
 	if w.currStuffer == nil {
-		return fmt.Errorf("append: no current journal stuffer")
+		return fmt.Errorf("wal append: no current journal stuffer")
 	}
 	if w.timeToRotate() {
 		if err := w.rotate(); err != nil {
@@ -258,7 +247,7 @@ func (w *WAL) Append(b []byte) error {
 	}
 	n, err := w.currStuffer.Append(w.nextIndex, b)
 	if err != nil {
-		return fmt.Errorf("append: %w", err)
+		return fmt.Errorf("wal append: %w", err)
 	}
 	w.currSize += int64(n)
 	w.currCount++
@@ -325,10 +314,10 @@ func CheckIndexName(name, prefix string, index uint64) error {
 		return fmt.Errorf("check index name %q: %w", name, err)
 	}
 	if i != index {
-		return fmt.Errorf("check index name %q: want index %d, got %d", name, index, i)
+		return fmt.Errorf("check index name %q: data index is %d, but filename index is %d", name, index, i)
 	}
 	if p != prefix {
-		return fmt.Errorf("check index name %q: want prefix %q, got %q", name, prefix, p)
+		return fmt.Errorf("check index name %q: desired prefix %q, but filename prefix is %q", name, prefix, p)
 	}
 	return nil
 }
@@ -339,7 +328,7 @@ func ParseIndexName(name string) (prefix string, index uint64, err error) {
 	if len(groups) == 0 {
 		return "", 0, fmt.Errorf("parse name: no match for %q", name)
 	}
-	prefix, idxStr := groups[0], groups[1]
+	prefix, idxStr := groups[1], groups[2]
 	idx, err := strconv.ParseUint(idxStr, 16, 64)
 	if err != nil {
 		return "", 0, fmt.Errorf("parse name: %w", err)
