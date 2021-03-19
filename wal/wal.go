@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+
+	"entrogo.com/stuffedio"
 )
 
 const (
@@ -85,10 +87,10 @@ type WAL struct {
 	snapshotAdder Adder
 	journalPlayer Player
 
-	currSize       int64                 // Current size of current journal file.
-	prevFinalIndex uint64                // Last index of previous journal file.
-	nextIndex      uint64                // Keep track of what the next record's index should be.
-	currStuffer    *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
+	currSize    int64                 // Current size of current journal file.
+	currCount   int                   // Current number of indices in current journal file.
+	nextIndex   uint64                // Keep track of what the next record's index should be.
+	currStuffer *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -141,7 +143,11 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 	// TODO: clean up any journal files before jStart? Move them to a "please collect me" location?
 
 	if latestSnapshot != "" {
-		sReader := stuffedio.NewUnstuffer(fsys.Open(latestSnapshot)).WAL()
+		f, err := fsys.Open(latestSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("open wal open snapshot: %w", err)
+		}
+		sReader := stuffedio.NewUnstuffer(f).WAL()
 		for !sReader.Done() {
 			idx, b, err := sReader.Next()
 			if err != nil {
@@ -156,20 +162,17 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 	jNames = jNames[jStart:]
 
 	var (
-		finalSize  int64  // last file's size
-		finalIndex uint64 // last file's last index
-		finalCount int    // last file's number of valid records
-		finalName  string // last file's name
+		finalSize int64  // last file's size
+		lastStart uint64 // last start index
+		lastFinal uint64 // last final index
+		finalName string // last file's name
 	)
 	if len(jNames) != 0 {
 		var (
-			first uint64
-			last  uint64
-
 			prevConsumed int64
 			newFileName  string
 		)
-		filesIter := stuffedio.NewFileUnstufferIterator(fsys, jNames)
+		filesIter := stuffedio.NewFilesUnstufferIterator(fsys, jNames)
 		jUnstuffer := stuffedio.NewMultiUnstufferIter(filesIter)
 		jWALReader := stuffedio.NewWALUnstuffer(jUnstuffer)
 
@@ -179,10 +182,11 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		// finished, so we can calculate the final file's size.
 		// Also track the expected index when a new file starts (which will be
 		// the previous one-past-end index).
-		filesIter.RegisterOnStart(func(f fs.File) error {
+		filesIter.RegisterOnStart(func(name string, f fs.File) error {
 			prevConsumed = jUnstuffer.Consumed()
-			newFileName = f.Name() // save for quick index check
-			finalName = f.Name()   // save for much later
+			newFileName = name // save for quick index check
+			finalName = name   // save for much later
+			return nil
 		})
 
 		for !jWALReader.Done() {
@@ -190,14 +194,14 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 			if err != nil {
 				return nil, fmt.Errorf("open wal journal next (%d): %w", idx, err)
 			}
-			if newFileName {
+			if newFileName != "" {
 				if err := CheckIndexName(newFileName, w.journalPrefix, idx); err != nil {
 					return nil, fmt.Errorf("open wal check journal name: %w", err)
 				}
-				first = idx      // remember the first index for this file.
+				lastStart = idx  // remember the first index for this file.
 				newFileName = "" // don't remember it next time around.
 			}
-			last = idx
+			lastFinal = idx
 			if err := w.journalPlayer.Play(b); err != nil {
 				return nil, fmt.Errorf("open wal journal play (%d): %w", idx, err)
 			}
@@ -210,14 +214,14 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 
 		// Compute the file size and number of records in the last journal.
 		finalSize = jUnstuffer.Consumed() - prevConsumed
-		finalCount = int(last - first + 1)
-		finalIndex = last
 	}
 
 	// Stats for the current journal file.
 	w.currSize = finalSize
-	w.prevFinalIndex = finalIndex
-	w.nextIndex = finalIndex + 1
+	if lastStart != 0 && lastFinal >= lastStart {
+		w.currCount = int(lastFinal - lastStart + 1)
+	}
+	w.nextIndex = lastFinal + 1
 
 	if finalName == "" || w.timeToRotate() {
 		if err := w.rotate(); err != nil {
@@ -227,7 +231,7 @@ func Open(dir string, loader Adder, replayer Player, opts ...Option) (*WAL, erro
 		// Can append to last file found.
 		f, err := os.OpenFile(filepath.Join(w.dir, finalName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			return fmt.Errorf("open wal for append: %w", err)
+			return nil, fmt.Errorf("open wal for append: %w", err)
 		}
 		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
 	}
@@ -240,14 +244,16 @@ func (w *WAL) Append(b []byte) error {
 	if w.currStuffer == nil {
 		return fmt.Errorf("append: no current journal stuffer")
 	}
-	if err := w.rotateIfReady(); err != nil {
-		return fmt.Errorf("append rotate if ready: %v", err)
+	if w.timeToRotate() {
+		if err := w.rotate(); err != nil {
+			return fmt.Errorf("append rotate if ready: %v", err)
+		}
 	}
 	n, err := w.currStuffer.Append(w.nextIndex, b)
 	if err != nil {
 		return fmt.Errorf("append: %w", err)
 	}
-	w.currSize += n
+	w.currSize += int64(n)
 	w.nextIndex++
 	return nil
 }
@@ -257,41 +263,32 @@ func (w *WAL) timeToRotate() bool {
 	if w.currSize > w.maxJournalBytes {
 		return true
 	}
-	if int(w.nextIndex-w.prevFinalIndex) > w.maxJournalIndices {
+	if w.currCount > w.maxJournalIndices {
 		return true
 	}
 	return false
 }
 
-// rotateIfReady checks whether it's time to rotate, then optionally rotates
-// the current journal file.
-func (w *WAL) rotateIfReady() error {
-	if !w.timeToRotate() {
-		return nil
-	}
-	if err := w.rotate(); err != nil {
-		return fmt.Errorf("rotate if ready: %w", err)
-	}
-	return nil
-}
-
 // rotate performs a file rotation, closing the current stuffer and opening a
 // new one over a new file, if possible.
 func (w *WAL) rotate() error {
+	defer func() {
+		w.currCount = 0
+		w.currSize = 0
+	}()
 	// Close current.
 	if w.currStuffer != nil {
-		if err := w.currStuffer.Close(); err != nil {
+		s := w.currStuffer
+		w.currStuffer = nil
+		if err := s.Close(); err != nil {
 			return fmt.Errorf("rotate: %w", err)
 		}
-		w.currStuffer = nil
-		w.prevFinalIndex = w.nextIndex - 1
 	}
 	// Open new.
 	f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalPrefix, w.nextIndex)))
 	if err != nil {
 		return fmt.Errorf("rotate: %w", err)
 	}
-	w.currSize = 0
 	w.currStuffer = stuffedio.NewStuffer(f).WAL(
 		stuffedio.WithFirstIndex(w.nextIndex),
 	)

@@ -148,7 +148,7 @@ type FilesUnstufferIterator struct {
 	file     io.ReadCloser
 	nextName int
 
-	onStart func(fs.File) error
+	onStart func(string, fs.File) error
 }
 
 // NewFilesUnstufferIterator creates a new iterator from a list of file names.
@@ -160,7 +160,7 @@ func NewFilesUnstufferIterator(fsys fs.FS, names []string) *FilesUnstufferIterat
 }
 
 // RegisterOnStart registers a function to be called when a new file is about to be started.
-func (r *FilesUnstufferIterator) RegisterOnStart(f func(fs.File) error) {
+func (r *FilesUnstufferIterator) RegisterOnStart(f func(string, fs.File) error) {
 	r.onStart = f
 }
 
@@ -177,12 +177,13 @@ func (r *FilesUnstufferIterator) Next() (*Unstuffer, error) {
 		r.file.Close()
 	}
 
-	f, err := r.fsys.Open(r.names[r.nextName])
+	fname := r.names[r.nextName]
+	f, err := r.fsys.Open(fname)
 	if err != nil {
 		return nil, fmt.Errorf("next reader file: %w", err)
 	}
 	if r.onStart != nil {
-		r.onStart(f)
+		r.onStart(fname, f)
 	}
 	r.file = f
 	return NewUnstuffer(f), nil
