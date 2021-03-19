@@ -91,7 +91,10 @@ func (r *MultiUnstuffer) Next() ([]byte, error) {
 		return nil, fmt.Errorf("multi next: %w", err)
 	}
 	b, err := r.reader.Next()
-	return b, err
+	if err != nil {
+		return nil, fmt.Errorf("multi next: %w", err)
+	}
+	return b, nil
 }
 
 // Done returns whether this multi reader has exhausted all underlying readers.
