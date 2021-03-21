@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sort"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -56,7 +57,7 @@ func TestWAL_Snapshots(t *testing.T) {
 		var snapFound []string
 		w, err := Open(dir,
 			WithAllowWrite(true),
-			WithSnapshotAdder(func(b []byte) error {
+			WithSnapshotLoader(func(b []byte) error {
 				snapFound = append(snapFound, string(b))
 				return nil
 			}),
@@ -88,6 +89,7 @@ func TestWAL_Snapshots(t *testing.T) {
 	for _, de := range ds {
 		gotNames = append(gotNames, de.Name())
 	}
+	sort.Strings(gotNames)
 	if diff := cmp.Diff(expectNames, gotNames); diff != "" {
 		t.Fatalf("WAL snapshot with journal: unexpected filename diff (-want +got):\n%v", diff)
 	}
@@ -102,7 +104,7 @@ func TestWAL_Snapshots(t *testing.T) {
 				journalFound = append(journalFound, string(b))
 				return nil
 			}),
-			WithSnapshotAdder(func(b []byte) error {
+			WithSnapshotLoader(func(b []byte) error {
 				snapFound = append(snapFound, string(b))
 				return nil
 			}),
@@ -195,8 +197,8 @@ func TestWAL_JournalOnly(t *testing.T) {
 
 	// Check that we have expected names.
 	expectNames := []string{
-		"0000000000000001-journal",
-		"0000000000000003-journal",
+		"0000000000000001-journal-final",
+		"0000000000000003-journal-final",
 		"0000000000000005-journal",
 	}
 	var gotNames []string
@@ -248,7 +250,12 @@ func TestWAL_JournalOnly(t *testing.T) {
 	}
 
 	// Check that a new file was added due to rotation.
-	allNames := append(expectNames, "0000000000000007-journal")
+	allNames := []string{
+		"0000000000000001-journal-final",
+		"0000000000000003-journal-final",
+		"0000000000000005-journal-final",
+		"0000000000000007-journal",
+	}
 	gotNames = nil
 	ds, err = os.ReadDir(dir)
 	for _, de := range ds {

@@ -12,8 +12,8 @@ import (
 func appendToWAL(dir string, values []string) error {
 	w, err := wal.Open(dir,
 		wal.WithAllowWrite(true),
-		wal.WithAllowEmptySnapshotAdder(true),
-		wal.WithAllowEmptyJournalPlayer(true),
+		wal.WithEmptySnapshotLoader(true),
+		wal.WithEmptyJournalPlayer(true),
 	)
 	if err != nil {
 		return fmt.Errorf("append to WAL: %w", err)
@@ -30,7 +30,7 @@ func appendToWAL(dir string, values []string) error {
 
 func readWAL(dir string) (snapshot, journal []string, idx uint64, err error) {
 	w, err := wal.Open(dir,
-		wal.WithSnapshotAdder(func(b []byte) error {
+		wal.WithSnapshotLoader(func(b []byte) error {
 			snapshot = append(snapshot, string(b))
 			return nil
 		}),
