@@ -643,21 +643,49 @@ func ParseIndexName(name string) (*FileMeta, error) {
 	}, nil
 }
 
-// CreateSnapshot creates a snapshot stuffer for writing.
-func CreateSnapshot(dir, base string, idx uint64) (*stuffedio.WALStuffer, error) {
-	baseName := IndexName(base, idx)
-	partialName := PartPrefix + baseName
-	name := filepath.Join(dir, partialName)
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("create snapshot: %w", err)
+// ValueAdder describes the interface passed to snapshot creation functions,
+// allowing them to add entries to a snapshot while important scaffolding is
+// handled behind the scenes..
+type ValueAdder interface {
+	AddValue([]byte) error
+}
+
+type journalStufferAdder struct {
+	stuffer *WALStuffer
+	index   uint64
+}
+
+// AddValue adds a value to a snapshot.
+func (a *journalStufferAdder) AddValue(b []byte) error {
+	if _, err := a.stuffer.Append(a.index+1, b); err != nil {
+		return fmt.Errorf("snapshot add value: %w", err)
 	}
-	w := stuffedio.NewStuffer(f).WAL()
-	w.RegisterClose(func() error {
-		if err := os.Rename(name, filepath.Join(dir, baseName)); err != nil {
-			return fmt.Errorf("create snapshot rename: %w", err)
-		}
-		return nil
-	})
-	return w, nil
+	a.index++
+	return nil
+}
+
+// Snapshotter receives a ValuerAdder that it can use to provide values. If it
+// returns a non-nil error, the snapshot will not be finalized.
+type Snapshotter func(ValueAdder) error
+
+// CreateSnapshot creates a snapshot stuffer for writing.
+func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
+	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex))
+	f, err := os.OpenFile(liveName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return "", fmt.Errorf("create snapshot: %w", err)
+	}
+	adder := &journalStufferAdder{
+		stuffer: stuffedio.NewStuffer(f).WAL(),
+	}
+	if err := s(adder); err != nil {
+		return "", fmt.Errorf("create snapshot: %w", err)
+	}
+	// No error, close this thing and rename it.
+	adder.stuffer.Close()
+	finalName := liveName + "-" + FinalSuffix
+	if err := os.Rename(liveName, finalName); err != nil {
+		return "", fmt.Errorf("create snapshot finalize: %w", err)
+	}
+	return finalName, nil
 }
