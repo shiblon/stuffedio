@@ -645,6 +645,11 @@ func ParseIndexName(name string) (*FileMeta, error) {
 
 // CreateSnapshot creates a snapshot stuffer for writing.
 func (w *WAL) CreateSnapshot() (*stuffedio.WALStuffer, error) {
+	// TODO: this should be passed an iterator or something. It has really terrible error handling semantics.
+	// Also, if we create a snapshot, we should only allow that if we are in
+	// read-only mode and excluding live journals, otherwise we can get into a
+	// situation where we have to rotate, which is a write operation, and
+	// that's not really how we want this going down.
 	baseName := IndexName(w.snapshotBase, w.CurrIndex())
 	partialName := PartPrefix + baseName
 	name := filepath.Join(w.dir, partialName)
