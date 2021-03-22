@@ -224,7 +224,6 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		maxJournalIndices: DefaultMaxIndices,
 		snapshotBase:      DefaultSnapshotBase,
 	}
-
 	for _, opt := range opts {
 		opt(w)
 	}
@@ -232,11 +231,9 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if w.excludeLive && w.allowWrite {
 		return nil, fmt.Errorf("wal open configuration: can't allow writes while excluding the final live journal")
 	}
-
 	if w.emptyLoader && w.snapshotLoader != nil {
 		return nil, fmt.Errorf("wal open configuration: can't specify both empty and non-empty snapshot adder")
 	}
-
 	if w.emptyPlayer && w.journalPlayer != nil {
 		return nil, fmt.Errorf("wal open configuration: can't specify both empty and non-empty journal player")
 	}
@@ -247,11 +244,9 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal open file meta: %w", err)
 	}
-
 	if w.requireInitiallyEmpty && dInf.hasFiles() {
 		return nil, fmt.Errorf("wal open configuration: empty initial dir required, but files found in %q", dir)
 	}
-
 	if err := w.deprecateOldFiles(dInf); err != nil {
 		return nil, fmt.Errorf("wal open deprecate: %w", err)
 	}
@@ -260,7 +255,6 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal open snapshot: %w", err)
 	}
-
 	journalOK, err := w.playJournals(fsys, dInf, w.excludeLive)
 	if err != nil {
 		return nil, fmt.Errorf("wal open journals: %w", err)
@@ -270,7 +264,6 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if !snapshotOK && !journalOK {
 		w.nextIndex = 1
 	}
-
 	if !w.allowWrite {
 		// Read-only - don't open the last file for writing.
 		return w, nil
