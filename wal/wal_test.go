@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestWAL_Snapshots(t *testing.T) {
 	dir, cleanup := mustTempDir(t)
 	defer cleanup()
 
-	snapValues := []string{
+	initialValues := []string{
 		"Hello 1",
 		"Hello 2",
 		"Hello 3",
@@ -33,17 +34,21 @@ func TestWAL_Snapshots(t *testing.T) {
 
 	// Create a snapshot.
 	func() {
-		snap, err := CreateSnapshot(dir, DefaultSnapshotBase, uint64(len(snapValues)))
-		if err != nil {
-			t.Fatalf("WAL snapshot create: %v", err)
-		}
-		defer snap.Close()
-
-		for i, v := range snapValues {
-			idx := uint64(i + 1)
-			if _, err := snap.Append(idx, []byte(v)); err != nil {
-				t.Fatalf("WAL snapshot append: %v", err)
+		// Get started.
+		w, err := Open(dir, WithRequireEmpty(true))
+		snapName, err := w.CreateSnapshot(func(a ValueAdder) error {
+			for _, v := range initialValues {
+				if err := a.AddValue([]byte(v)); err != nil {
+					return fmt.Errorf("snapshotter: %w", err)
+				}
 			}
+			return nil
+		})
+		if want, got := "0000000000000001-snapshot-final", filepath.Base(snapName); got != want {
+			t.Fatalf("WAL snapshot: expected name %q, got %q", want, got)
+		}
+		if err != nil {
+			t.Fatalf("WAL snapshot adder: %v", err)
 		}
 	}()
 
@@ -65,7 +70,7 @@ func TestWAL_Snapshots(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WAL snapshot open: %v", err)
 		}
-		if diff := cmp.Diff(snapValues, snapFound); diff != "" {
+		if diff := cmp.Diff(initialValues, snapFound); diff != "" {
 			t.Fatalf("WAL snapshot re-read unexpected diff (-want +got):\n%v", diff)
 		}
 
@@ -78,8 +83,8 @@ func TestWAL_Snapshots(t *testing.T) {
 	}()
 
 	expectNames := []string{
-		"0000000000000003-snapshot",
-		"0000000000000004-journal",
+		"0000000000000001-snapshot-final",
+		"0000000000000002-journal",
 	}
 	ds, err := fs.ReadDir(os.DirFS(dir), ".")
 	if err != nil {
@@ -112,7 +117,7 @@ func TestWAL_Snapshots(t *testing.T) {
 			t.Fatalf("WAL snapshot read with journal: %v", err)
 		}
 
-		if diff := cmp.Diff(snapValues, snapFound); diff != "" {
+		if diff := cmp.Diff(initialValues, snapFound); diff != "" {
 			t.Fatalf("WAL snapshot read with journal: unexpected diff in snapshot (-want +got):\n%v", diff)
 		}
 		if diff := cmp.Diff(journalValues, journalFound); diff != "" {

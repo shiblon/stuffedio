@@ -36,6 +36,21 @@ type Loader func([]byte) error
 // Option describes a WAL creation option.
 type Option func(*WAL)
 
+// WithRequireEmpty can be used to indicate that this is a brand new WAL and it
+// must have zero files in it when it is initially opened. Can be used with
+// WithAllowWrite if desired. Implies that empty loaders and players are
+// allowed.
+func WithRequireEmpty(e bool) Option {
+	return func(w *WAL) {
+		w.requireInitiallyEmpty = e
+		if e {
+			w.emptyLoader = true
+			w.emptyPlayer = true
+			w.excludeLive = true
+		}
+	}
+}
+
 // WithJournalBase sets the journal base, otherwise uses DefaultJournalBase.
 func WithJournalBase(p string) Option {
 	return func(w *WAL) {
@@ -132,10 +147,11 @@ type WAL struct {
 	maxJournalBytes   int64
 	maxJournalIndices int
 
-	emptyLoader bool
-	emptyPlayer bool
-	allowWrite  bool
-	excludeLive bool
+	emptyLoader           bool
+	emptyPlayer           bool
+	allowWrite            bool
+	excludeLive           bool
+	requireInitiallyEmpty bool
 
 	snapshotLoader Loader
 	journalPlayer  Loader
@@ -156,7 +172,19 @@ type FileMeta struct {
 	Index   uint64
 	IsFinal bool
 	IsOld   bool
-	IsPart  bool
+}
+
+// String outputs friendly info for this file meta.
+func (m *FileMeta) String() string {
+	fStr := "f"
+	oStr := "o"
+	if !m.IsFinal {
+		fStr = "!f"
+	}
+	if !m.IsOld {
+		oStr = "!o"
+	}
+	return fmt.Sprintf("%s=(%s:%d:%s:%s)", m.Name, m.Base, m.Index, fStr, oStr)
 }
 
 type dirInfo struct {
@@ -168,6 +196,21 @@ type dirInfo struct {
 
 	journals     []*FileMeta
 	liveJournals []*FileMeta
+}
+
+func (d *dirInfo) String() string {
+	var lines []string
+	lines = append(lines, fmt.Sprintf("oldSnapshots: %q", d.oldSnapshots))
+	lines = append(lines, fmt.Sprintf("oldJournals: %q", d.oldJournals))
+	lines = append(lines, fmt.Sprintf("partSnapshots: %q", d.partSnapshots))
+	lines = append(lines, fmt.Sprintf("snapshots: %q", d.snapshots))
+	lines = append(lines, fmt.Sprintf("journals: %q", d.journals))
+	lines = append(lines, fmt.Sprintf("liveJournals: %q", d.liveJournals))
+	return "dirInfo:\n\t" + strings.Join(lines, "\n\t")
+}
+
+func (d *dirInfo) hasFiles() bool {
+	return len(d.oldSnapshots) != 0 || len(d.oldJournals) != 0 || len(d.partSnapshots) != 0 || len(d.snapshots) != 0 || len(d.journals) != 0 || len(d.liveJournals) != 0
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -203,6 +246,10 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	dInf, err := w.openDir(fsys)
 	if err != nil {
 		return nil, fmt.Errorf("wal open file meta: %w", err)
+	}
+
+	if w.requireInitiallyEmpty && dInf.hasFiles() {
+		return nil, fmt.Errorf("wal open configuration: empty initial dir required, but files found in %q", dir)
 	}
 
 	if err := w.deprecateOldFiles(dInf); err != nil {
@@ -282,7 +329,7 @@ func (w *WAL) openDir(fsys fs.FS) (*dirInfo, error) {
 				inf.journals = append(inf.journals, meta)
 			}
 		case w.snapshotBase:
-			if meta.IsPart {
+			if !meta.IsFinal {
 				inf.partSnapshots = append(inf.partSnapshots, meta)
 			} else if meta.IsOld {
 				inf.oldSnapshots = append(inf.oldSnapshots, meta)
@@ -527,13 +574,33 @@ func (w *WAL) CurrIndex() uint64 {
 	return w.nextIndex - 1
 }
 
-// Close cleans up any open resources.
+// Close cleans up any open resources. Live journals are left live, however,
+// for next time. To ensure that live journals get finalized, call Finalize.
 func (w *WAL) Close() error {
 	if w.currStuffer != nil {
 		err := w.currStuffer.Close()
 		w.currStuffer = nil
 		return err
 	}
+	return nil
+}
+
+// Finalize causes an open live journal to become final, so it will not be
+// appended to again. After completion, writes are disabled, but snapshots can be created.
+func (w *WAL) Finalize() error {
+	if !w.allowWrite {
+		return fmt.Errorf("wal finalize: can't finalize a read-only log")
+	}
+	if w.currStuffer == nil {
+		return fmt.Errorf("wal finalize: no live journal to finalize")
+	}
+
+	if err := w.finalizeLiveJournal(); err != nil {
+		return fmt.Errorf("wal finalize: %w", err)
+	}
+
+	w.allowWrite = false
+
 	return nil
 }
 
@@ -548,6 +615,27 @@ func (w *WAL) timeToRotate() (yes bool) {
 	return false
 }
 
+// finalizeLiveJournal closes the current journal, if any, and renames it to be final.
+func (w *WAL) finalizeLiveJournal() error {
+	if !w.allowWrite {
+		return fmt.Errorf("finalize impl: cannot finalize if writing is not allowed")
+	}
+	if w.currStuffer == nil {
+		return nil
+	}
+	if w.currMeta == nil {
+		return fmt.Errorf("finalize impl: stuffer available, but meta not - should never happen")
+	}
+	err := w.currStuffer.Close()
+	liveName := filepath.Join(w.dir, w.currMeta.Name)
+	w.currStuffer = nil
+	w.currMeta = nil
+	if err := os.Rename(liveName, liveName+"-"+FinalSuffix); err != nil {
+		return fmt.Errorf("rotate rename live: %w", err)
+	}
+	return err
+}
+
 // rotate performs a file rotation, closing the current stuffer and opening a
 // new one over a new file, if possible.
 func (w *WAL) rotate() error {
@@ -558,18 +646,8 @@ func (w *WAL) rotate() error {
 		w.currCount = 0
 		w.currSize = 0
 	}()
-	// Close current, rename to not be live.
-	if w.currStuffer != nil {
-		err := w.currStuffer.Close()
-		liveName := filepath.Join(w.dir, w.currMeta.Name)
-		w.currStuffer = nil
-		w.currMeta = nil
-		if err := os.Rename(liveName, liveName+"-"+FinalSuffix); err != nil {
-			return fmt.Errorf("rotate rename live: %w", err)
-		}
-		if err != nil {
-			return fmt.Errorf("rotate: %w", err)
-		}
+	if err := w.finalizeLiveJournal(); err != nil {
+		return fmt.Errorf("rotate: %w", err)
 	}
 	// Open new.
 	live := &FileMeta{
@@ -638,7 +716,6 @@ func ParseIndexName(name string) (*FileMeta, error) {
 		Base:    base,
 		Index:   idx,
 		IsOld:   isOld,
-		IsPart:  isPart,
 		IsFinal: isFinal,
 	}, nil
 }
@@ -651,7 +728,7 @@ type ValueAdder interface {
 }
 
 type journalStufferAdder struct {
-	stuffer *WALStuffer
+	stuffer *stuffedio.WALStuffer
 	index   uint64
 }
 
@@ -670,6 +747,14 @@ type Snapshotter func(ValueAdder) error
 
 // CreateSnapshot creates a snapshot stuffer for writing.
 func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
+	if w.allowWrite {
+		// Danger if it's writeable - we don't want to snapshot after reading a live journal.
+		return "", fmt.Errorf("wal snapshot: can't create snapshot when log is open for write")
+	}
+	if !w.excludeLive {
+		// Danger if we include live journals.
+		return "", fmt.Errorf("wal snapshot: can't create snapshot unless live journal is excluded.")
+	}
 	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex))
 	f, err := os.OpenFile(liveName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {

@@ -9,7 +9,7 @@ import (
 	"entrogo.com/stuffedio/wal"
 )
 
-func appendToWAL(dir string, values []string) error {
+func appendToWAL(dir string, values []string, finalize bool) error {
 	w, err := wal.Open(dir,
 		wal.WithAllowWrite(true),
 		wal.WithEmptySnapshotLoader(true),
@@ -25,10 +25,15 @@ func appendToWAL(dir string, values []string) error {
 			return fmt.Errorf("append to WAL: %w", err)
 		}
 	}
+	if finalize {
+		if err := w.Finalize(); err != nil {
+			return fmt.Errorf("append to WAL: %w", err)
+		}
+	}
 	return nil
 }
 
-func readWAL(dir string) (snapshot, journal []string, idx uint64, err error) {
+func readWAL(dir string) (snapshot, journal []string, err error) {
 	w, err := wal.Open(dir,
 		wal.WithSnapshotLoader(func(b []byte) error {
 			snapshot = append(snapshot, string(b))
@@ -40,32 +45,42 @@ func readWAL(dir string) (snapshot, journal []string, idx uint64, err error) {
 		}),
 	)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("read WAL: %v", err)
+		return nil, nil, fmt.Errorf("read WAL: %v", err)
 	}
 	defer w.Close()
 
-	return snapshot, journal, w.CurrIndex(), nil
+	return snapshot, journal, nil
 }
 
-func makeSnapshot(dir string, lastIndex uint64, values []string) (err error) {
-	snap, err := wal.CreateSnapshot(dir, wal.DefaultSnapshotBase, lastIndex)
+func makeSnapshot(dir string) (string, error) {
+	var values []string
+	w, err := wal.Open(dir,
+		wal.WithExcludeLiveJournal(true),
+		wal.WithJournalPlayer(func(b []byte) error {
+			values = append(values, string(b))
+			return nil
+		}),
+		wal.WithSnapshotLoader(func(b []byte) error {
+			values = append(values, string(b))
+			return nil
+		}),
+	)
 	if err != nil {
-		return fmt.Errorf("Error createing snapshot: %w", err)
+		return "", fmt.Errorf("make snapshot: %w", err)
 	}
 
-	defer func() {
-		// Only close if there is no error - otherwise leave it partial; it didn't work.
-		if err == nil {
-			snap.Close()
+	fname, err := w.CreateSnapshot(func(a wal.ValueAdder) error {
+		for _, val := range values {
+			if err := a.AddValue([]byte(val)); err != nil {
+				return fmt.Errorf("snapshotter: %w", err)
+			}
 		}
-	}()
-
-	for i, v := range values {
-		if _, err := snap.Append(uint64(i+1), []byte(v)); err != nil {
-			return fmt.Errorf("Create snapshot append: %w", err)
-		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("make snapshot: %w", err)
 	}
-	return nil
+	return fname, nil
 }
 
 func mustLogFiles(dir string) {
@@ -93,12 +108,12 @@ func Example() {
 		"Message 2",
 		"Message 3",
 		"Message 4",
-	}); err != nil {
+	}, true); err != nil {
 		log.Fatalf("Error appending to empty WAL: %v", err)
 	}
 
 	// Read them back, also prepare to make a snapshot.
-	snapshotVals, journalVals, lastIndex, err := readWAL(dir)
+	snapshotVals, journalVals, err := readWAL(dir)
 	if err != nil {
 		log.Fatalf("Error reading initial WAL: %v", err)
 	}
@@ -112,20 +127,20 @@ func Example() {
 	}
 
 	// Now create a snapshot and dump values into it, based on where we ended up when in read-only mode.
-	if err := makeSnapshot(dir, lastIndex, journalVals); err != nil {
+	if _, err := makeSnapshot(dir); err != nil {
 		log.Fatalf("Error creating snapshot: %v", err)
 	}
 
-	// We can now open again in write mode, and dump more things in the journal:
+	// We can now open again in write mode, and dump more things in the journal. We'll leave it live this time:
 	if err := appendToWAL(dir, []string{
 		"Message 5",
 		"Message 6",
-	}); err != nil {
+	}, false); err != nil {
 		log.Fatalf("Error appending to WAL after snapshot: %v", err)
 	}
 
 	// Read the whole WAL back, which will include the snapshot and latest journal.
-	finalSnapVals, finalJVals, _, err := readWAL(dir)
+	finalSnapVals, finalJVals, err := readWAL(dir)
 	if err != nil {
 		log.Fatalf("Error reading final WAL: %v", err)
 	}
