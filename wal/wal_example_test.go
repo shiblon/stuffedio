@@ -126,12 +126,14 @@ func Example() {
 		fmt.Println("- Journal: " + val)
 	}
 
-	// Now create a snapshot and dump values into it, based on where we ended up when in read-only mode.
+	// Now create a snapshot and dump values into it, based on where we ended
+	// up when in read-only mode.
 	if _, err := makeSnapshot(dir); err != nil {
 		log.Fatalf("Error creating snapshot: %v", err)
 	}
 
-	// We can now open again in write mode, and dump more things in the journal. We'll leave it live this time:
+	// We can now open again in write mode, and dump more things in the
+	// journal. We'll leave it "live" this time:
 	if err := appendToWAL(dir, []string{
 		"Message 5",
 		"Message 6",
