@@ -644,20 +644,20 @@ func ParseIndexName(name string) (*FileMeta, error) {
 }
 
 // CreateSnapshot creates a snapshot stuffer for writing.
-func CreateSnapshot(dir, base string, idx uint64) (*stuffedio.WALStuffer, error) {
-	baseName := IndexName(base, idx)
+func (w *WAL) CreateSnapshot() (*stuffedio.WALStuffer, error) {
+	baseName := IndexName(w.snapshotBase, w.CurrIndex())
 	partialName := PartPrefix + baseName
-	name := filepath.Join(dir, partialName)
+	name := filepath.Join(w.dir, partialName)
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("create snapshot: %w", err)
 	}
-	w := stuffedio.NewStuffer(f).WAL()
-	w.RegisterClose(func() error {
-		if err := os.Rename(name, filepath.Join(dir, baseName)); err != nil {
+	s := stuffedio.NewStuffer(f).WAL()
+	s.RegisterClose(func() error {
+		if err := os.Rename(name, filepath.Join(w.dir, baseName)); err != nil {
 			return fmt.Errorf("create snapshot rename: %w", err)
 		}
 		return nil
 	})
-	return w, nil
+	return s, nil
 }

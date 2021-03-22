@@ -28,8 +28,8 @@ func appendToWAL(dir string, values []string) error {
 	return nil
 }
 
-func readWAL(dir string) (snapshot, journal []string, idx uint64, err error) {
-	w, err := wal.Open(dir,
+func readWAL(dir string) (w *wal.WAL, snapshot, journal []string, err error) {
+	w, err = wal.Open(dir,
 		wal.WithSnapshotLoader(func(b []byte) error {
 			snapshot = append(snapshot, string(b))
 			return nil
@@ -40,15 +40,14 @@ func readWAL(dir string) (snapshot, journal []string, idx uint64, err error) {
 		}),
 	)
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("read WAL: %v", err)
+		return nil, nil, nil, fmt.Errorf("read WAL: %v", err)
 	}
-	defer w.Close()
 
-	return snapshot, journal, w.CurrIndex(), nil
+	return w, snapshot, journal, nil
 }
 
-func makeSnapshot(dir string, lastIndex uint64, values []string) (err error) {
-	snap, err := wal.CreateSnapshot(dir, wal.DefaultSnapshotBase, lastIndex)
+func makeSnapshot(w *wal.WAL, values []string) (err error) {
+	snap, err := w.CreateSnapshot()
 	if err != nil {
 		return fmt.Errorf("Error createing snapshot: %w", err)
 	}
@@ -98,10 +97,11 @@ func Example() {
 	}
 
 	// Read them back, also prepare to make a snapshot.
-	snapshotVals, journalVals, lastIndex, err := readWAL(dir)
+	w, snapshotVals, journalVals, err := readWAL(dir)
 	if err != nil {
 		log.Fatalf("Error reading initial WAL: %v", err)
 	}
+	defer w.Close()
 
 	fmt.Println("Read Initial:")
 	for _, val := range snapshotVals {
@@ -112,7 +112,7 @@ func Example() {
 	}
 
 	// Now create a snapshot and dump values into it, based on where we ended up when in read-only mode.
-	if err := makeSnapshot(dir, lastIndex, journalVals); err != nil {
+	if err := makeSnapshot(w, journalVals); err != nil {
 		log.Fatalf("Error creating snapshot: %v", err)
 	}
 
@@ -125,10 +125,11 @@ func Example() {
 	}
 
 	// Read the whole WAL back, which will include the snapshot and latest journal.
-	finalSnapVals, finalJVals, _, err := readWAL(dir)
+	w, finalSnapVals, finalJVals, err := readWAL(dir)
 	if err != nil {
 		log.Fatalf("Error reading final WAL: %v", err)
 	}
+	defer w.Close()
 
 	fmt.Println("Read Final:")
 	for _, v := range finalSnapVals {

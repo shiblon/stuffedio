@@ -31,9 +31,25 @@ func TestWAL_Snapshots(t *testing.T) {
 		"Hello 3",
 	}
 
+	w, err := Open(
+		dir,
+		WithAllowWrite(true),
+		WithEmptySnapshotLoader(true),
+		WithEmptyJournalPlayer(true),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create new WAL: %v", err)
+	}
+
+	for _, v := range snapValues {
+		if err := w.Append([]byte(v)); err != nil {
+			t.Fatalf("Error appending: %v", err)
+		}
+	}
+
 	// Create a snapshot.
 	func() {
-		snap, err := CreateSnapshot(dir, DefaultSnapshotBase, uint64(len(snapValues)))
+		snap, err := w.CreateSnapshot()
 		if err != nil {
 			t.Fatalf("WAL snapshot create: %v", err)
 		}
