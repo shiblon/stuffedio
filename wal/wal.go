@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 
 	"entrogo.com/stuffedio"
 )
@@ -21,13 +20,10 @@ const (
 	DefaultSnapshotBase = "snapshot"
 	DefaultMaxIndices   = 10 * 1 << 10 // 10Ki
 	DefaultMaxBytes     = 10 * 1 << 20 // 10Mi
-	OldPrefix           = "_old__"
-	PartPrefix          = "_partial__"
-	FinalSuffix         = "final"
 )
 
 var (
-	indexPattern = regexp.MustCompile(`^([a-fA-F0-9]+)-([^.-]+)(?:-(` + FinalSuffix + `))?$`)
+	indexPattern = regexp.MustCompile(`^([a-fA-F0-9]+)-([^.]+)$`)
 )
 
 // Loader is a function type called by snapshot item loads and journal entry replay.
@@ -50,11 +46,11 @@ func WithSnapshotBase(p string) Option {
 	}
 }
 
-// WithSnapshotLoader sets the record adder for all snapshot records. Clients
+// WithSnapshotAdder sets the record adder for all snapshot records. Clients
 // provide one of these to allow snapshots to be loaded.
-func WithSnapshotLoader(a Loader) Option {
+func WithSnapshotAdder(a Loader) Option {
 	return func(w *WAL) {
-		w.snapshotLoader = a
+		w.snapshotAdder = a
 	}
 }
 
@@ -96,29 +92,22 @@ func WithAllowWrite(a bool) Option {
 	}
 }
 
-// WithEmptySnapshotLoader indicates that not loading a snapshot is
+// WithAllowEmptySnapshotAdder indicates that not loading a snapshot is
 // actually desired. This is to prevent mistakes: usually a snapshot adder is
 // wanted, if there is a snapshot to be added.
-func WithEmptySnapshotLoader(a bool) Option {
+func WithAllowEmptySnapshotAdder(a bool) Option {
 	return func(w *WAL) {
-		w.emptyLoader = a
+		w.allowEmptyAdder = a
 	}
 }
 
-// WithEmptyJournalPlayer indicates that journals are to be scanned, not processed.
+// WithAllowEmptyJournalPlayer indicates that journals are to be scanned, not processed.
 // This is a safety measure to avoid default behavior being unwanted: usually
 // you want to process journal entries, but sometimes there is good reason to
 // simply scan for the proper index and start appending.
-func WithEmptyJournalPlayer(a bool) Option {
+func WithAllowEmptyJournalPlayer(a bool) Option {
 	return func(w *WAL) {
-		w.emptyPlayer = a
-	}
-}
-
-// WithExcludeLiveJournal indicates that only "final" journals should be played. Implies writing disallowed. It is an error to specify this with WithAllowWrite.
-func WithExcludeLiveJournal(e bool) Option {
-	return func(w *WAL) {
-		w.excludeLive = e
+		w.allowEmptyPlayer = a
 	}
 }
 
@@ -132,42 +121,19 @@ type WAL struct {
 	maxJournalBytes   int64
 	maxJournalIndices int
 
-	emptyLoader bool
-	emptyPlayer bool
-	allowWrite  bool
-	excludeLive bool
+	allowEmptyAdder  bool
+	allowEmptyPlayer bool
+	allowWrite       bool
 
-	snapshotLoader Loader
-	journalPlayer  Loader
+	snapshotAdder Loader
+	journalPlayer Loader
 
 	snapshotWasLast bool // If the snapshot was the last thing read (no later journals).
 
 	currSize    int64                 // Current size of current journal file.
 	currCount   int                   // Current number of indices in current journal file.
-	currMeta    *FileMeta             // Current info about the live journal.
 	nextIndex   uint64                // Keep track of what the next record's index should be.
 	currStuffer *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
-}
-
-// FileMeta contains information about a file entry in the log directory.
-type FileMeta struct {
-	Name    string
-	Base    string
-	Index   uint64
-	IsFinal bool
-	IsOld   bool
-	IsPart  bool
-}
-
-type dirInfo struct {
-	oldSnapshots []*FileMeta
-	oldJournals  []*FileMeta
-
-	partSnapshots []*FileMeta
-	snapshots     []*FileMeta
-
-	journals     []*FileMeta
-	liveJournals []*FileMeta
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -186,280 +152,135 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		opt(w)
 	}
 
-	if w.excludeLive && w.allowWrite {
-		return nil, fmt.Errorf("wal open configuration: can't allow writes while excluding the final live journal")
-	}
-
-	if w.emptyLoader && w.snapshotLoader != nil {
-		return nil, fmt.Errorf("wal open configuration: can't specify both empty and non-empty snapshot adder")
-	}
-
-	if w.emptyPlayer && w.journalPlayer != nil {
-		return nil, fmt.Errorf("wal open configuration: can't specify both empty and non-empty journal player")
-	}
-
 	fsys := os.DirFS(dir)
 
-	dInf, err := w.openDir(fsys)
+	type entry struct {
+		i    uint64
+		name string
+	}
+
+	var (
+		snapshotEntries []entry
+		journalEntries  []entry
+	)
+
+	ds, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		return nil, fmt.Errorf("wal open file meta: %w", err)
+		return nil, fmt.Errorf("open wal list files: %w", err)
 	}
-
-	if err := w.deprecateOldFiles(dInf); err != nil {
-		return nil, fmt.Errorf("wal open deprecate: %w", err)
-	}
-
-	snapshotOK, err := w.loadSnapshot(fsys, dInf)
-	if err != nil {
-		return nil, fmt.Errorf("wal open snapshot: %w", err)
-	}
-
-	journalOK, err := w.playJournals(fsys, dInf, w.excludeLive)
-	if err != nil {
-		return nil, fmt.Errorf("wal open journals: %w", err)
-	}
-
-	// If nothing was read (snapshot or journal), set up for a correct first index.
-	if !snapshotOK && !journalOK {
-		w.nextIndex = 1
-	}
-
-	if !w.allowWrite {
-		// Read-only - don't open the last file for writing.
-		return w, nil
-	}
-
-	if err := w.maybeInitLiveJournal(dInf); err != nil {
-		return nil, fmt.Errorf("open wal init live: %w", err)
-	}
-
-	return w, nil
-}
-
-func (w *WAL) maybeInitLiveJournal(inf *dirInfo) error {
-	if w.excludeLive || !w.allowWrite {
-		return fmt.Errorf("init live invalid request: exclude=%v, write=%v", w.excludeLive, w.allowWrite)
-	}
-	if live, liveOK := inf.liveJournalToContinue(); liveOK {
-		f, err := os.OpenFile(filepath.Join(w.dir, live.Name), os.O_APPEND|os.O_WRONLY, 0644)
+	for _, de := range ds {
+		base, idx, err := ParseIndexName(de.Name())
 		if err != nil {
-			return fmt.Errorf("init live from file: %w", err)
-		}
-		w.currMeta = live
-		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
-		return nil
-	}
-
-	// No live journal file, time to make one. We can do that by rotating. We
-	// have a nil currStuffer, and the last index of the last thing read is
-	// known.
-	if err := w.rotate(); err != nil {
-		return fmt.Errorf("init live new rotate: %w", err)
-	}
-
-	return nil
-}
-
-func (w *WAL) openDir(fsys fs.FS) (*dirInfo, error) {
-	ents, err := fs.ReadDir(fsys, ".")
-	if err != nil {
-		return nil, fmt.Errorf("catalog files: %w", err)
-	}
-	inf := new(dirInfo)
-	for _, ent := range ents {
-		meta, err := ParseIndexName(ent.Name())
-		if err != nil {
-			log.Printf("Unrecognized file pattern for %q, skipping", ent.Name())
+			log.Printf("Unrecognized file pattern in %q, skipping", de.Name())
 			continue
 		}
-		switch meta.Base {
+		switch base {
 		case w.journalBase:
-			if !meta.IsFinal {
-				inf.liveJournals = append(inf.liveJournals, meta)
-			} else if meta.IsOld {
-				inf.oldJournals = append(inf.oldJournals, meta)
-			} else {
-				inf.journals = append(inf.journals, meta)
-			}
+			journalEntries = append(journalEntries, entry{idx, de.Name()})
 		case w.snapshotBase:
-			if meta.IsPart {
-				inf.partSnapshots = append(inf.partSnapshots, meta)
-			} else if meta.IsOld {
-				inf.oldSnapshots = append(inf.oldSnapshots, meta)
-			} else {
-				inf.snapshots = append(inf.snapshots, meta)
-			}
+			snapshotEntries = append(snapshotEntries, entry{idx, de.Name()})
 		default:
-			return nil, fmt.Errorf("Unknown base in %q", meta.Name)
+			log.Printf("Unrecognized file base in %q, skipping", de.Name())
 		}
 	}
+	sort.Slice(snapshotEntries, func(i, j int) bool {
+		return snapshotEntries[i].i < snapshotEntries[j].i
+	})
+	sort.Slice(journalEntries, func(i, j int) bool {
+		return journalEntries[i].i < journalEntries[j].i
+	})
 
-	sortMeta := func(s []*FileMeta) {
-		sort.Slice(s, func(i, j int) bool { return s[i].Name < s[j].Name })
-	}
+	snapshotEntry := entry{}
+	if len(snapshotEntries) != 0 {
+		snapshotEntry = snapshotEntries[len(snapshotEntries)-1]
 
-	sortMeta(inf.oldSnapshots)
-	sortMeta(inf.oldJournals)
-	sortMeta(inf.partSnapshots)
-	sortMeta(inf.snapshots)
-	sortMeta(inf.journals)
-	sortMeta(inf.liveJournals)
-
-	if err := inf.checkValid(); err != nil {
-		return nil, fmt.Errorf("invalid dir info: %w", err)
-	}
-
-	return inf, nil
-}
-
-func (d *dirInfo) checkValid() error {
-	if snap, ok := d.snapshotToLoad(); ok {
-		if js := d.journalsToPlay(); len(js) != 0 {
-			if got, want := js[0].Index, snap.Index+1; want != got {
-				return fmt.Errorf("first journal has index %d, wanted 1 greater than snapshot %d", got, want)
+		if w.allowWrite {
+			// Move early snapshots to non-matching names. Can be collected later.
+			earlier := snapshotEntries[:len(snapshotEntries)-1]
+			for _, e := range earlier {
+				name := e.name
+				if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "_old__"+name)); err != nil {
+					return nil, fmt.Errorf("open wal move early snapshots: %w", err)
+				}
 			}
 		}
 	}
-	return nil
-}
 
-func (d *dirInfo) firstUsefulJournal() int {
-	snap, ok := d.snapshotToLoad()
-	if !ok {
-		// No snapshot, first useful journal is the first journal.
-		return 0
-	}
-	for i, j := range d.journals {
-		if j.Index > snap.Index {
-			return i
-		}
-	}
-	return len(d.journals) // no useful journals, return one beyond the end.
-}
-
-func (d *dirInfo) snapshotToLoad() (*FileMeta, bool) {
-	if len(d.snapshots) == 0 {
-		return nil, false
-	}
-	return d.snapshots[len(d.snapshots)-1], true
-}
-
-func (d *dirInfo) snapshotsToDeprecate() []*FileMeta {
-	if len(d.snapshots) < 2 {
-		return nil
-	}
-	return d.snapshots[:len(d.snapshots)-1]
-}
-
-func (d *dirInfo) journalsToPlay() []*FileMeta {
-	return d.journals[d.firstUsefulJournal():]
-}
-
-func (d *dirInfo) journalsToDeprecate() []*FileMeta {
-	return d.journals[:d.firstUsefulJournal()]
-}
-
-func (d *dirInfo) liveJournalToContinue() (*FileMeta, bool) {
-	if len(d.liveJournals) == 0 {
-		return nil, false
-	}
-	j := d.liveJournals[len(d.liveJournals)-1]
-	if snap, ok := d.snapshotToLoad(); ok && j.Index <= snap.Index {
-		return nil, false
-	}
-	prevJs := d.journalsToPlay()
-	if len(prevJs) != 0 && prevJs[len(prevJs)-1].Index >= j.Index {
-		return nil, false
-	}
-
-	return j, true
-}
-
-func (w *WAL) deprecateOldFiles(inf *dirInfo) error {
-	if !w.allowWrite {
-		return nil // ignore if not allowed to write
-	}
-	mv := func(name string) error {
-		return os.Rename(filepath.Join(w.dir, name), filepath.Join(w.dir, OldPrefix+name))
-	}
-
-	for _, m := range inf.snapshotsToDeprecate() {
-		if err := mv(m.Name); err != nil {
-			return fmt.Errorf("open wal deprecate snapshots: %w", err)
+	// Default to no journals.
+	jStart := len(journalEntries)
+	for i, entry := range journalEntries {
+		if entry.i > snapshotEntry.i {
+			jStart = i
+			break
 		}
 	}
 
-	for _, m := range inf.journalsToDeprecate() {
-		if err := mv(m.Name); err != nil {
-			return fmt.Errorf("open wal deprecate journals: %w", err)
+	// Move early journals to non-matching names. Can be collected later.
+	if w.allowWrite {
+		for _, e := range journalEntries[:jStart] {
+			if err := os.Rename(filepath.Join(dir, e.name), filepath.Join(dir, "_old__"+e.name)); err != nil {
+				return nil, fmt.Errorf("open wal move early journals: %w", err)
+			}
 		}
 	}
-	return nil
-}
 
-func (w *WAL) loadSnapshot(fsys fs.FS, inf *dirInfo) (bool, error) {
-	snapshot, snapshotOK := inf.snapshotToLoad()
-	if !snapshotOK {
-		return false, nil
+	if snapshotEntry.name != "" {
+		// Only allow snapshot load to be skipped if explicitly asked.
+		if !w.allowEmptyAdder && w.snapshotAdder == nil {
+			return nil, fmt.Errorf("open wal: snapshot found but no snapshot adder option given")
+		}
+		// Skip reading snapshot if requested.
+		if w.snapshotAdder != nil {
+			f, err := fsys.Open(snapshotEntry.name)
+			if err != nil {
+				return nil, fmt.Errorf("open wal open snapshot: %w", err)
+			}
+			u := stuffedio.NewUnstuffer(f).WAL()
+			for !u.Done() {
+				idx, b, err := u.Next()
+				if err != nil {
+					return nil, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
+				}
+				if err := w.snapshotAdder(b); err != nil {
+					return nil, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
+				}
+			}
+		}
 	}
 
-	// Only allow snapshot load to be skipped if explicitly asked.
-	if !w.emptyLoader && w.snapshotLoader == nil {
-		return false, fmt.Errorf("open wal: snapshot found but no snapshot adder option given")
+	var jNames []string
+	for _, e := range journalEntries[jStart:] {
+		jNames = append(jNames, e.name)
 	}
 
-	// Snapshot indicates which journal index should come next.
-	w.nextIndex = snapshot.Index + 1
-
-	// Skip reading snapshot if requested.
-	if w.snapshotLoader == nil {
-		return true, nil
-	}
-
-	f, err := fsys.Open(snapshot.Name)
-	if err != nil {
-		return false, fmt.Errorf("open wal open snapshot: %w", err)
-	}
-	u := stuffedio.NewUnstuffer(f).WAL()
-	for !u.Done() {
-		idx, b, err := u.Next()
+	// If we have a snapshot, then it is expected that the next journal file in
+	// line has a name that is exactly 1 more than the index in the snapshot
+	// name. Thus, the snapshot is named after the most recent journal's final
+	// good index.
+	w.nextIndex = 0
+	if snapshotEntry.name != "" {
+		_, idx, err := ParseIndexName(snapshotEntry.name)
 		if err != nil {
-			return false, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
+			return nil, fmt.Errorf("open wal snapshot parse: %w", err)
 		}
-		if err := w.snapshotLoader(b); err != nil {
-			return false, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
-		}
-	}
-	return true, nil
-}
-
-func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, error) {
-	toPlay := inf.journalsToPlay()
-	if live, ok := inf.liveJournalToContinue(); !excludeLive && ok {
-		toPlay = append(toPlay, live)
-	}
-
-	if len(toPlay) == 0 {
-		return false, nil
+		w.nextIndex = idx + 1
 	}
 
 	// Note that we don't use the files iterator and multi unstuffer because
 	// we need filenames all the way along the process, to check that indices match.
 	// So we implement some of the loops here by hand instead.
-	for _, m := range toPlay {
-		name := m.Name
-
+	for _, name := range jNames {
 		w.currCount = 0
-		if !w.emptyPlayer && w.journalPlayer == nil {
-			return false, fmt.Errorf("play journal: journal files found but no journal player option given")
+		if !w.allowEmptyPlayer && w.journalPlayer == nil {
+			return nil, fmt.Errorf("open wal: journal files found but no journal player option given")
 		}
 		f, err := fsys.Open(name)
 		if err != nil {
-			return false, fmt.Errorf("play journal open: %w", err)
+			return nil, fmt.Errorf("open wal file: %w", err)
 		}
 		fi, err := f.Stat()
 		if err != nil {
-			return false, fmt.Errorf("play journal stat: %w", err)
+			return nil, fmt.Errorf("open wal stat: %w", err)
 		}
 		w.currSize = fi.Size()
 
@@ -470,30 +291,55 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 		for !u.Done() {
 			idx, b, err := u.Next()
 			if err != nil {
-				return false, fmt.Errorf("play journal next: %w", err)
+				return nil, fmt.Errorf("open wal next: %w", err)
 			}
 			if w.nextIndex == 0 {
 				w.nextIndex = idx
 			}
 			if w.nextIndex != idx {
-				return false, fmt.Errorf("play journal next: want index %d, got %d", w.nextIndex, idx)
+				return nil, fmt.Errorf("open wal next: want index %d, got %d", w.nextIndex, idx)
 			}
 			w.nextIndex++
 			w.currCount++
 			if !checked {
 				checked = true
 				if err := CheckIndexName(name, w.journalBase, idx); err != nil {
-					return false, fmt.Errorf("play journal check: %w", err)
+					return nil, fmt.Errorf("open wal check: %w", err)
 				}
 			}
 			if w.journalPlayer != nil {
 				if err := w.journalPlayer(b); err != nil {
-					return false, fmt.Errorf("play journal: %w", err)
+					return nil, fmt.Errorf("open wal play: %w", err)
 				}
 			}
 		}
 	}
-	return true, nil
+
+	// If nothing was read, set up for a correct first index.
+	if w.nextIndex == 0 {
+		w.nextIndex = 1
+	}
+
+	if !w.allowWrite {
+		// Read-only - don't open the last file for writing.
+		return w, nil
+	}
+
+	if len(jNames) == 0 || w.timeToRotate() {
+		if err := w.rotate(); err != nil {
+			return nil, fmt.Errorf("open wal new journal: %w", err)
+		}
+		return w, nil
+	}
+
+	// Room left in last file, allow append there.
+	f, err := os.OpenFile(filepath.Join(w.dir, jNames[len(jNames)-1]), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open wal for append: %w", err)
+	}
+	w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
+
+	return w, nil
 }
 
 // Append sends another record to the journal, and can trigger rotation of underlying files.
@@ -558,30 +404,19 @@ func (w *WAL) rotate() error {
 		w.currCount = 0
 		w.currSize = 0
 	}()
-	// Close current, rename to not be live.
+	// Close current.
 	if w.currStuffer != nil {
 		err := w.currStuffer.Close()
-		liveName := filepath.Join(w.dir, w.currMeta.Name)
 		w.currStuffer = nil
-		w.currMeta = nil
-		if err := os.Rename(liveName, liveName+"-"+FinalSuffix); err != nil {
-			return fmt.Errorf("rotate rename live: %w", err)
-		}
 		if err != nil {
 			return fmt.Errorf("rotate: %w", err)
 		}
 	}
 	// Open new.
-	live := &FileMeta{
-		Name:  IndexName(w.journalBase, w.nextIndex),
-		Base:  w.journalBase,
-		Index: w.nextIndex,
-	}
-	f, err := os.Create(filepath.Join(w.dir, live.Name))
+	f, err := os.Create(filepath.Join(w.dir, IndexName(w.journalBase, w.nextIndex)))
 	if err != nil {
-		return fmt.Errorf("rotate new live: %w", err)
+		return fmt.Errorf("rotate: %w", err)
 	}
-	w.currMeta = live
 	w.currStuffer = stuffedio.NewStuffer(f).WAL(
 		stuffedio.WithFirstIndex(w.nextIndex),
 	)
@@ -595,74 +430,75 @@ func IndexName(base string, idx uint64) string {
 
 // CheckIndexName checkes that the given file name contains the right base and index.
 func CheckIndexName(name, base string, index uint64) error {
-	meta, err := ParseIndexName(name)
+	p, i, err := ParseIndexName(name)
 	if err != nil {
 		return fmt.Errorf("check index name %q: %w", name, err)
 	}
-	if meta.Index != index {
-		return fmt.Errorf("check index name %q: data index is %d, but filename index is %d", name, index, meta.Index)
+	if i != index {
+		return fmt.Errorf("check index name %q: data index is %d, but filename index is %d", name, index, i)
 	}
-	if meta.Base != base {
-		return fmt.Errorf("check index name %q: desired base %q, but filename base is %q", name, base, meta.Base)
+	if p != base {
+		return fmt.Errorf("check index name %q: desired base %q, but filename base is %q", name, base, p)
 	}
 	return nil
 }
 
 // ParseIndexName pulls the index from a file name. Should not have path components.
-func ParseIndexName(name string) (*FileMeta, error) {
-	isOld := strings.HasPrefix(name, OldPrefix)
-	isPart := strings.HasPrefix(name, PartPrefix)
-
-	checkName := name
-
-	if isOld {
-		checkName = name[len(OldPrefix):]
-	}
-	if isPart {
-		checkName = name[len(PartPrefix):]
-	}
-
-	groups := indexPattern.FindStringSubmatch(checkName)
+func ParseIndexName(name string) (base string, index uint64, err error) {
+	groups := indexPattern.FindStringSubmatch(name)
 	if len(groups) == 0 {
-		return nil, fmt.Errorf("parse name %q: no match for %q", name, checkName)
+		return "", 0, fmt.Errorf("parse name: no match for %q", name)
 	}
-	idxStr, base, finalSuffix := groups[1], groups[2], groups[3]
-	isFinal := finalSuffix == FinalSuffix
-
+	idxStr, base := groups[1], groups[2]
 	idx, err := strconv.ParseUint(idxStr, 16, 64)
 	if err != nil {
-		return nil, fmt.Errorf("parse name: %w", err)
+		return "", 0, fmt.Errorf("parse name: %w", err)
 	}
-	return &FileMeta{
-		Name:    name,
-		Base:    base,
-		Index:   idx,
-		IsOld:   isOld,
-		IsPart:  isPart,
-		IsFinal: isFinal,
-	}, nil
+	return base, idx, nil
 }
 
-// CreateSnapshot creates a snapshot stuffer for writing.
-func (w *WAL) CreateSnapshot() (*stuffedio.WALStuffer, error) {
-	// TODO: this should be passed an iterator or something. It has really terrible error handling semantics.
-	// Also, if we create a snapshot, we should only allow that if we are in
-	// read-only mode and excluding live journals, otherwise we can get into a
-	// situation where we have to rotate, which is a write operation, and
-	// that's not really how we want this going down.
-	baseName := IndexName(w.snapshotBase, w.CurrIndex())
-	partialName := PartPrefix + baseName
-	name := filepath.Join(w.dir, partialName)
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("create snapshot: %w", err)
+// ValueAdder describes the interface passed to snapshot creation functions,
+// allowing them to add entries to a snapshot while important scaffolding is
+// handled behind the scenes..
+type ValueAdder interface {
+	AddValue([]byte) error
+}
+
+type journalStufferAdder struct {
+	stuffer *WALStuffer
+	index   uint64
+}
+
+func (a *journalStufferAdder) AddValue(b []byte) error {
+	if _, err := a.stuffer.Append(a.index+1, b); err != nil {
+		return fmt.Errorf("snapshot add value: %w", err)
 	}
-	s := stuffedio.NewStuffer(f).WAL()
-	s.RegisterClose(func() error {
-		if err := os.Rename(name, filepath.Join(w.dir, baseName)); err != nil {
-			return fmt.Errorf("create snapshot rename: %w", err)
-		}
-		return nil
-	})
-	return s, nil
+	a.index++
+	return nil
+}
+
+// Snapshotter receives a ValuerAdder that it can use to provide values. If it
+// returns a non-nil error, the snapshot will not be finalized.
+type Snapshotter func(ValueAdder) error
+
+// CreateSnapshot creates a snapshot stuffer for writing.
+func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
+	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex))
+	f, err := os.OpenFile(liveName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return "", fmt.Errorf("create snapshot: %w", err)
+	}
+	adder := &journalStufferAdder{
+		stuffer: stuffedio.NewStuffer(f).WAL(),
+	}
+	if err := s(adder); err != nil {
+		return "", fmt.Errorf("create snapshot: %w", err)
+	}
+	// No error, close this thing and rename it.
+	adder.stuffer.Close()
+	finalName := liveName + "-" + FinalSuffix
+	if err := os.Rename(liveName, finalName); err != nil {
+		return "", fmt.Errorf("create snapshot finalize: %w", err)
+	}
+	return finalName, nil
 }
