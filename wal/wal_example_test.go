@@ -69,6 +69,10 @@ func makeSnapshot(dir string) (string, error) {
 		return "", fmt.Errorf("make snapshot: %w", err)
 	}
 
+	if err := w.CheckCanSnapshot(); err != nil {
+		return "", fmt.Errorf("make snapshot: %w", err)
+	}
+
 	fname, err := w.CreateSnapshot(func(a wal.ValueAdder) error {
 		for _, val := range values {
 			if err := a.AddValue([]byte(val)); err != nil {

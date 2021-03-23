@@ -153,6 +153,9 @@ type WAL struct {
 	excludeLive           bool
 	requireInitiallyEmpty bool
 
+	loadedAJournal  bool
+	loadedASnapshot bool
+
 	snapshotLoader Loader
 	journalPlayer  Loader
 
@@ -255,10 +258,13 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal open snapshot: %w", err)
 	}
+	w.loadedASnapshot = snapshotOK
+
 	journalOK, err := w.playJournals(fsys, dInf, w.excludeLive)
 	if err != nil {
 		return nil, fmt.Errorf("wal open journals: %w", err)
 	}
+	w.loadedAJournal = journalOK
 
 	// If nothing was read (snapshot or journal), set up for a correct first index.
 	if !snapshotOK && !journalOK {
@@ -713,6 +719,34 @@ func ParseIndexName(name string) (*FileMeta, error) {
 	}, nil
 }
 
+// CanSnapshot indicates whether a snapshot can be taken, ignoring the actual reason.
+// Calls CheckCanSnapshot underneath. If a reason error is desired, use CheckCanSnapshot.
+func (w *WAL) CanSnapshot() bool {
+	return w.CheckCanSnapshot() == nil
+}
+
+// CheckCanSnapshot indicates whether a snapshot can be taken, returning a
+// non-nil error with an appropriate message if not. In
+// particular, if no journals have been loaded, either because the last thing
+// found was a snapshot, or because there simply aren't any, it usually doesn't
+// make sense to create a snapshot. One exception to this is if no journals or
+// snapshots are loaded at all, indicating an effectively empty journal
+// directory. In this case, it is allowed to create a snapshot (e.g., to seed a
+// new WAL with values already known).
+
+func (w *WAL) CheckCanSnapshot() error {
+	if w.allowWrite {
+		return fmt.Errorf("wal check snapshot: snapshots can't be taken on writable WAL")
+	}
+	if !w.excludeLive {
+		return fmt.Errorf("wal check snapshot: snapshots can't be taken when live journals are in the data")
+	}
+	if !w.loadedAJournal && w.loadedASnapshot {
+		return fmt.Errorf("wal check snapshot: last thing read was a snapshot, it doesn't make sense to take one")
+	}
+	return nil
+}
+
 // ValueAdder describes the interface passed to snapshot creation functions,
 // allowing them to add entries to a snapshot while important scaffolding is
 // handled behind the scenes..
@@ -738,15 +772,12 @@ func (a *journalStufferAdder) AddValue(b []byte) error {
 // returns a non-nil error, the snapshot will not be finalized.
 type Snapshotter func(ValueAdder) error
 
-// CreateSnapshot creates a snapshot stuffer for writing.
+// CreateSnapshot creates a snapshot stuffer for writing. Checks whether it can
+// proceed first, returning an error if it is not sensible to create a
+// snapshot. Call CanSnapshot first to look before you leap.
 func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
-	if w.allowWrite {
-		// Danger if it's writeable - we don't want to snapshot after reading a live journal.
-		return "", fmt.Errorf("wal snapshot: can't create snapshot when log is open for write")
-	}
-	if !w.excludeLive {
-		// Danger if we include live journals.
-		return "", fmt.Errorf("wal snapshot: can't create snapshot unless live journal is excluded.")
+	if err := w.CheckCanSnapshot(); err != nil {
+		return "", fmt.Errorf("wal snapshot: %w", err)
 	}
 	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex))
 	f, err := os.OpenFile(liveName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
