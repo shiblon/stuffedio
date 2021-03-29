@@ -35,11 +35,11 @@ func appendToWAL(dir string, values []string, finalize bool) error {
 
 func readWAL(dir string) (snapshot, journal []string, err error) {
 	w, err := wal.Open(dir,
-		wal.WithSnapshotLoader(func(b []byte) error {
+		wal.WithSnapshotLoaderFunc(func(b []byte) error {
 			snapshot = append(snapshot, string(b))
 			return nil
 		}),
-		wal.WithJournalPlayer(func(b []byte) error {
+		wal.WithJournalPlayerFunc(func(b []byte) error {
 			journal = append(journal, string(b))
 			return nil
 		}),
@@ -56,11 +56,11 @@ func makeSnapshot(dir string) (string, error) {
 	var values []string
 	w, err := wal.Open(dir,
 		wal.WithExcludeLiveJournal(true),
-		wal.WithJournalPlayer(func(b []byte) error {
+		wal.WithJournalPlayerFunc(func(b []byte) error {
 			values = append(values, string(b))
 			return nil
 		}),
-		wal.WithSnapshotLoader(func(b []byte) error {
+		wal.WithSnapshotLoaderFunc(func(b []byte) error {
 			values = append(values, string(b))
 			return nil
 		}),

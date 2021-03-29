@@ -13,7 +13,7 @@
 // reads, those checksums are checked.
 //
 // Repeated indices are allowed, with only the first valid record for that
-// indicdes being returned on read.
+// indices being returned on read.
 //
 // The first record's index must be 1 or higher. Options allow a specific
 // starting index to be enforced (e.g., when the file name indicates the
@@ -25,7 +25,7 @@
 // An example of how this works is below:
 //
 //	buf := new(bytes.Buffer)
-//	e := NewEncoder(recordio.NewEncoder(buf))
+//	e := NewStreamEncoder(buf)
 //
 //	// Write messages.
 //	msgs := []string{
@@ -41,7 +41,7 @@
 //	}
 //
 //	// Now read them back.
-//	d := NewDecoder(recordio.NewDecoder(buf))
+//	d := NewStreamDecoder(buf)
 //	defer d.Close()
 //	for !d.Done() {
 //		idx, val, err := d.Next()
@@ -63,6 +63,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+
+	"entrogo.com/stuffedio/recordio"
 )
 
 var CRCTable = crc32.MakeTable(crc32.Koopman)
@@ -101,10 +103,10 @@ func ExpectFirstIndex(index uint64) DecoderOption {
 }
 
 // ExpectDescending tells the unstuffer to expect indices to be in strictly
-// descending order, rather than ascending.
-func ExpectDescending() DecoderOption {
+// descending order, rather than ascending. Default is false.
+func ExpectDescending(desc bool) DecoderOption {
 	return func(d *Decoder) {
-		d.descending = true
+		d.descending = desc
 	}
 }
 
@@ -120,6 +122,12 @@ func NewDecoder(iter RecordIterator, opts ...DecoderOption) *Decoder {
 	}
 
 	return d
+}
+
+// NewStreamDecoder creates a Decoder over an io.Reader using the default
+// recordio.Decoder as the underlying RecordIterator.
+func NewStreamDecoder(r io.Reader, opts ...DecoderOption) *Decoder {
+	return NewDecoder(recordio.NewDecoder(r), opts...)
 }
 
 // unconditional read-ahead on the internal buffer.
@@ -264,6 +272,12 @@ func NewEncoder(a EncodeCloser, opts ...EncoderOption) *Encoder {
 	}
 
 	return e
+}
+
+// NewStreamEncoder creates an Encoder over an io.Writer, using the default
+// recordio.Encoder as the underlying EncodeCloser.
+func NewStreamEncoder(w io.Writer, opts ...EncoderOption) *Encoder {
+	return NewEncoder(recordio.NewEncoder(w), opts...)
 }
 
 // Encode writes a new log entry into the WAL.

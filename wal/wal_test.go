@@ -62,7 +62,7 @@ func TestWAL_Snapshots(t *testing.T) {
 		var snapFound []string
 		w, err := Open(dir,
 			WithAllowWrite(true),
-			WithSnapshotLoader(func(b []byte) error {
+			WithSnapshotLoaderFunc(func(b []byte) error {
 				snapFound = append(snapFound, string(b))
 				return nil
 			}),
@@ -105,11 +105,11 @@ func TestWAL_Snapshots(t *testing.T) {
 		var snapFound []string
 		var journalFound []string
 		if _, err := Open(dir,
-			WithJournalPlayer(func(b []byte) error {
+			WithJournalPlayerFunc(func(b []byte) error {
 				journalFound = append(journalFound, string(b))
 				return nil
 			}),
-			WithSnapshotLoader(func(b []byte) error {
+			WithSnapshotLoaderFunc(func(b []byte) error {
 				snapFound = append(snapFound, string(b))
 				return nil
 			}),
@@ -151,7 +151,7 @@ func TestWAL_ReadOnly(t *testing.T) {
 	var found []string
 	w, err = Open(dir,
 		WithAllowWrite(false),
-		WithJournalPlayer(func(b []byte) error {
+		WithJournalPlayerFunc(func(b []byte) error {
 			found = append(found, string(b))
 			return nil
 		}),
@@ -229,7 +229,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 		w, err := Open(dir,
 			WithMaxJournalIndices(2),
 			WithAllowWrite(true),
-			WithJournalPlayer(func(b []byte) error {
+			WithJournalPlayerFunc(func(b []byte) error {
 				readMsgs = append(readMsgs, string(b))
 				return nil
 			}),
@@ -275,7 +275,7 @@ func TestWAL_JournalOnly(t *testing.T) {
 	var finalMsgs []string
 	if err := func() error {
 		w, err := Open(dir,
-			WithJournalPlayer(func(b []byte) error {
+			WithJournalPlayerFunc(func(b []byte) error {
 				finalMsgs = append(finalMsgs, string(b))
 				return nil
 			}),

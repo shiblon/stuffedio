@@ -13,7 +13,7 @@ import (
 
 func ExampleReadWrite() {
 	buf := new(bytes.Buffer)
-	e := NewEncoder(recordio.NewEncoder(buf))
+	e := NewStreamEncoder(buf)
 
 	// Write messages.
 	msgs := []string{
@@ -29,7 +29,7 @@ func ExampleReadWrite() {
 	}
 
 	// Now read them back.
-	d := NewDecoder(recordio.NewDecoder(buf))
+	d := NewStreamDecoder(buf)
 	for !d.Done() {
 		idx, val, err := d.Next()
 		if err != nil {
@@ -132,7 +132,7 @@ func TestOrdered(t *testing.T) {
 		buf := new(bytes.Buffer)
 
 		// Test writes.
-		e := NewEncoder(recordio.NewEncoder(buf), WithFirstIndex(test.writeFirstIndex))
+		e := NewStreamEncoder(buf, WithFirstIndex(test.writeFirstIndex))
 
 		var writeErr error
 		for _, entry := range test.entries {
@@ -165,7 +165,7 @@ func TestOrdered(t *testing.T) {
 		}
 
 		// Test reads.
-		d := NewDecoder(recordio.NewDecoder(buf), ExpectFirstIndex(test.readInitialIndex))
+		d := NewStreamDecoder(buf, ExpectFirstIndex(test.readInitialIndex))
 
 		entryIdx := 0
 		var readErr error
@@ -211,7 +211,7 @@ func TestOrdered_descending(t *testing.T) {
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
 
-		s := NewEncoder(recordio.NewEncoder(buf))
+		s := NewStreamEncoder(buf)
 		for i, val := range test.vals {
 			if _, err := s.Encode(uint64(i+1), []byte(val)); err != nil {
 				t.Fatalf("Ordered descending %q append: %v", test.name, err)
@@ -220,7 +220,7 @@ func TestOrdered_descending(t *testing.T) {
 
 		u := NewDecoder(
 			recordio.NewReverseDecoder(bytes.NewReader(buf.Bytes()), int64(buf.Len())),
-			ExpectDescending(),
+			ExpectDescending(true),
 		)
 		nextIdx := uint64(len(test.vals))
 		for !u.Done() {

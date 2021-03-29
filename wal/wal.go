@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"entrogo.com/stuffedio/orderedio"
-	"entrogo.com/stuffedio/recordio"
 )
 
 const (
@@ -31,8 +30,27 @@ var (
 	indexPattern = regexp.MustCompile(`^([a-fA-F0-9]+)-([^.-]+)(?:-(` + FinalSuffix + `))?$`)
 )
 
-// Loader is a function type called by snapshot item loads and journal entry replay.
-type Loader func([]byte) error
+// Player is a function type called during journal item replay.
+type Player interface {
+	Play([]byte) error
+}
+
+// Loader is a function type called during snapshot item loading.
+type Loader interface {
+	Load([]byte) error
+}
+
+type PlayerFunc func([]byte) error
+
+func (f PlayerFunc) Play(b []byte) error {
+	return f(b)
+}
+
+type LoaderFunc func([]byte) error
+
+func (f LoaderFunc) Load(b []byte) error {
+	return f(b)
+}
 
 // Option describes a WAL creation option.
 type Option func(*WAL)
@@ -74,12 +92,22 @@ func WithSnapshotLoader(a Loader) Option {
 	}
 }
 
+// WithSnapshotLoaderFunc sets the snapshot loader using a function.
+func WithSnapshotLoaderFunc(f func([]byte) error) Option {
+	return WithSnapshotLoader(LoaderFunc(f))
+}
+
 // WithJournalPlayer sets the journal player for all journal records after the
 // latest snapshot. Clients provide this to allow journals to be replayed.
-func WithJournalPlayer(p Loader) Option {
+func WithJournalPlayer(p Player) Option {
 	return func(w *WAL) {
 		w.journalPlayer = p
 	}
+}
+
+// WithJournalPlayerFunc sets the journal player using a function.
+func WithJournalPlayerFunc(f func([]byte) error) Option {
+	return WithJournalPlayer(PlayerFunc(f))
 }
 
 // WithMaxJournalBytes sets the maximum number of bytes before a journal is rotated.
@@ -158,7 +186,7 @@ type WAL struct {
 	loadedASnapshot bool
 
 	snapshotLoader Loader
-	journalPlayer  Loader
+	journalPlayer  Player
 
 	snapshotWasLast bool // If the snapshot was the last thing read (no later journals).
 
@@ -293,10 +321,7 @@ func (w *WAL) maybeInitLiveJournal(inf *dirInfo) error {
 			return fmt.Errorf("init live from file: %w", err)
 		}
 		w.currMeta = live
-		w.currEncoder = orderedio.NewEncoder(
-			recordio.NewEncoder(f),
-			orderedio.WithFirstIndex(w.nextIndex),
-		)
+		w.currEncoder = orderedio.NewStreamEncoder(f, orderedio.WithFirstIndex(w.nextIndex))
 		return nil
 	}
 
@@ -470,13 +495,13 @@ func (w *WAL) loadSnapshot(fsys fs.FS, inf *dirInfo) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open wal open snapshot: %w", err)
 	}
-	dec := orderedio.NewDecoder(recordio.NewDecoder(f))
+	dec := orderedio.NewStreamDecoder(f)
 	for !dec.Done() {
 		idx, b, err := dec.Next()
 		if err != nil {
 			return false, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
 		}
-		if err := w.snapshotLoader(b); err != nil {
+		if err := w.snapshotLoader.Load(b); err != nil {
 			return false, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
 		}
 	}
@@ -513,7 +538,7 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 		}
 		w.currSize = fi.Size()
 
-		dec := orderedio.NewDecoder(recordio.NewDecoder(f))
+		dec := orderedio.NewStreamDecoder(f)
 		defer dec.Close()
 
 		checked := false
@@ -537,7 +562,7 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 				}
 			}
 			if w.journalPlayer != nil {
-				if err := w.journalPlayer(b); err != nil {
+				if err := w.journalPlayer.Play(b); err != nil {
 					return false, fmt.Errorf("play journal: %w", err)
 				}
 			}
@@ -663,10 +688,7 @@ func (w *WAL) rotate() error {
 		return fmt.Errorf("rotate new live: %w", err)
 	}
 	w.currMeta = live
-	w.currEncoder = orderedio.NewEncoder(
-		recordio.NewEncoder(f),
-		orderedio.WithFirstIndex(w.nextIndex),
-	)
+	w.currEncoder = orderedio.NewStreamEncoder(f, orderedio.WithFirstIndex(w.nextIndex))
 	return nil
 }
 
@@ -790,7 +812,7 @@ func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}
 	adder := &journalEncoderAdder{
-		encoder: orderedio.NewEncoder(recordio.NewEncoder(f)),
+		encoder: orderedio.NewStreamEncoder(f),
 	}
 	if err := s(adder); err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
