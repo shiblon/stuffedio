@@ -1,4 +1,4 @@
-package stuffedio_test
+package recordio_test
 
 import (
 	"bytes"
@@ -6,18 +6,18 @@ import (
 	"log"
 	"testing/fstest"
 
-	"entrogo.com/stuffedio"
+	"entrogo.com/stuffedio/recordio"
 )
 
 const prefix = "journal"
 
 func fakeJournalData(start, end uint64) (string, []byte) {
 	buf := new(bytes.Buffer)
-	w := stuffedio.NewStuffer(buf).WAL(stuffedio.WithFirstIndex(start))
-	defer w.Close()
+	enc := recordio.NewEncoder(buf)
+	defer enc.Close()
 
 	for i := start; i < end; i++ {
-		if _, err := w.Append(i, []byte(fmt.Sprintf("Record with number %d", i))); err != nil {
+		if _, err := enc.Encode([]byte(fmt.Sprintf("Record with number %d", i))); err != nil {
 			log.Fatalf("Error appending: %v", err)
 		}
 	}
@@ -25,7 +25,7 @@ func fakeJournalData(start, end uint64) (string, []byte) {
 	return fmt.Sprintf("%s-%016x", prefix, start), buf.Bytes()
 }
 
-func ExampleMultiUnstuffer() {
+func ExampleMultiDecoder() {
 	// Create a fake file system with some data in it.
 	fakeFS := make(fstest.MapFS)
 
@@ -40,24 +40,24 @@ func ExampleMultiUnstuffer() {
 		start = end
 	}
 
-	// Create a MultiUnstuffer WAL that knows about these files, using a FilesUnstufferIterator.
-	r := stuffedio.NewMultiUnstufferIter(stuffedio.NewFilesUnstufferIterator(fakeFS, names)).WAL()
-	defer r.Close()
+	// Create a MultiDecoder WAL that knows about these files, using a FilesDecoderIterator.
+	dec := recordio.NewMultiDecoderIter(recordio.NewFilesDecoderIterator(fakeFS, names))
+	defer dec.Close()
 
 	// Read entries in order.
-	for !r.Done() {
-		idx, val, err := r.Next()
+	for !dec.Done() {
+		val, err := dec.Next()
 		if err != nil {
 			log.Fatalf("Error reading next value: %v", err)
 		}
-		fmt.Printf("%d: %q\n", idx, val)
+		fmt.Printf("%q\n", val)
 	}
 
 	// Output:
-	// 1: "Record with number 1"
-	// 2: "Record with number 2"
-	// 3: "Record with number 3"
-	// 4: "Record with number 4"
-	// 5: "Record with number 5"
-	// 6: "Record with number 6"
+	// "Record with number 1"
+	// "Record with number 2"
+	// "Record with number 3"
+	// "Record with number 4"
+	// "Record with number 5"
+	// "Record with number 6"
 }

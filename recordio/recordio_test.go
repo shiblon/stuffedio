@@ -1,4 +1,4 @@
-package stuffedio
+package recordio
 
 import (
 	"bytes"
@@ -15,11 +15,11 @@ import (
 // 63 Characters, since 252 = 63 * 4.
 const c63 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
-func ExampleStuffer() {
+func ExampleEncoder() {
 	buf := new(bytes.Buffer)
 
-	w := NewStuffer(buf)
-	if _, err := w.Append([]byte("A very short message")); err != nil {
+	enc := NewEncoder(buf)
+	if _, err := enc.Encode([]byte("A very short message")); err != nil {
 		log.Fatalf("Error appending: %v", err)
 	}
 
@@ -29,10 +29,10 @@ func ExampleStuffer() {
 	// "\xfe\xfd\x14A very short message"
 }
 
-func ExampleUnstuffer() {
-	r := NewUnstuffer(bytes.NewBuffer([]byte("\xfe\xfd\x14A very short message\x00\x00\xfe\xfd\x05hello")))
-	for !r.Done() {
-		b, err := r.Next()
+func ExampleDecoder() {
+	dec := NewDecoder(bytes.NewBuffer([]byte("\xfe\xfd\x14A very short message\x00\x00\xfe\xfd\x05hello")))
+	for !dec.Done() {
+		b, err := dec.Next()
 		if err != nil {
 			log.Fatalf("Error reading: %v", err)
 		}
@@ -44,13 +44,13 @@ func ExampleUnstuffer() {
 	// "hello"
 }
 
-func ExampleUnstuffer_SkipPartial() {
-	r := NewUnstuffer(bytes.NewBuffer([]byte("middle-of-record\xfe\xfd\x02AB")))
-	if err := r.SkipPartial(); err != nil {
+func ExampleDecoder_SkipPartial() {
+	dec := NewDecoder(bytes.NewBuffer([]byte("middle-of-record\xfe\xfd\x02AB")))
+	if err := dec.SkipPartial(); err != nil {
 		log.Fatalf("Error skipping partial content: %v", err)
 	}
-	for !r.Done() {
-		b, err := r.Next()
+	for !dec.Done() {
+		b, err := dec.Next()
 		if err != nil {
 			log.Fatalf("Error reading: %v", err)
 		}
@@ -61,7 +61,7 @@ func ExampleUnstuffer_SkipPartial() {
 	// "AB"
 }
 
-func TestStuffer_Append_one(t *testing.T) {
+func TestEncoder_Encode_one(t *testing.T) {
 	cases := []struct {
 		name  string
 		write string
@@ -162,30 +162,30 @@ func TestStuffer_Append_one(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewStuffer(buf)
-		if _, err := w.Append([]byte(test.write)); err != nil {
-			t.Fatalf("Append_one %q: writing: %v", test.name, err)
+		enc := NewEncoder(buf)
+		if _, err := enc.Encode([]byte(test.write)); err != nil {
+			t.Fatalf("Encode_one %q: writing: %v", test.name, err)
 		}
 		if diff := cmp.Diff(test.raw, string(buf.Bytes())); diff != "" {
-			t.Fatalf("Append_one %q: unexpected diff (-want +got):\n%v", test.name, diff)
+			t.Fatalf("Encode_one %q: unexpected diff (-want +got):\n%v", test.name, diff)
 		}
-		r := NewUnstuffer(buf)
-		b, err := r.Next()
+		dec := NewDecoder(buf)
+		b, err := dec.Next()
 		switch {
 		case test.raw == "" && !errors.Is(err, io.EOF):
-			t.Fatalf("Append_one %q: expected EOF, got %v with value %q", test.name, err, string(b))
+			t.Fatalf("Encode_one %q: expected EOF, got %v with value %q", test.name, err, string(b))
 		case test.raw == "" && errors.Is(err, io.EOF):
 			// Do nothing
 		case err != nil:
-			t.Fatalf("Append_one %q: reading: %v", test.name, err)
+			t.Fatalf("Encode_one %q: reading: %v", test.name, err)
 		}
 		if want, got := test.write, string(b); want != got {
-			t.Errorf("Append_one %q: wanted read %q, got %q", test.name, want, got)
+			t.Errorf("Encode_one %q: wanted read %q, got %q", test.name, want, got)
 		}
 	}
 }
 
-func TestStuffer_Append_multiple(t *testing.T) {
+func TestEncoder_Encode_multiple(t *testing.T) {
 	cases := []struct {
 		name  string
 		write []string
@@ -202,30 +202,30 @@ func TestStuffer_Append_multiple(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewStuffer(buf)
+		enc := NewEncoder(buf)
 		for _, val := range test.write {
-			if _, err := w.Append([]byte(val)); err != nil {
-				t.Fatalf("Append_multiple %q: %v", test.name, err)
+			if _, err := enc.Encode([]byte(val)); err != nil {
+				t.Fatalf("Encode_multiple %q: %v", test.name, err)
 			}
 		}
 
 		var got []string
-		r := NewUnstuffer(buf)
-		for !r.Done() {
-			b, err := r.Next()
+		dec := NewDecoder(buf)
+		for !dec.Done() {
+			b, err := dec.Next()
 			if err != nil {
-				t.Fatalf("Append_multiple %q: %v", test.name, err)
+				t.Fatalf("Encode_multiple %q: %v", test.name, err)
 			}
 			got = append(got, string(b))
 		}
 
 		if diff := cmp.Diff(test.write, got); diff != "" {
-			t.Errorf("Append_multiple: %q unexpected diff (+got -want):\n%v", test.name, diff)
+			t.Errorf("Encode_multiple: %q unexpected diff (+got -want):\n%v", test.name, diff)
 		}
 	}
 }
 
-func TestUnstuffer_Next_corrupt(t *testing.T) {
+func TestDecoder_Next_corrupt(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -255,9 +255,9 @@ func TestUnstuffer_Next_corrupt(t *testing.T) {
 
 	for _, test := range cases {
 		buf := bytes.NewBuffer([]byte(test.raw))
-		r := NewUnstuffer(buf)
+		dec := NewDecoder(buf)
 		for i, want := range test.want {
-			b, err := r.Next()
+			b, err := dec.Next()
 			if err != nil {
 				switch {
 				case want == "" && errors.Is(err, CorruptRecord):
@@ -275,7 +275,7 @@ func TestUnstuffer_Next_corrupt(t *testing.T) {
 	}
 }
 
-func TestUnstuffer_Consumed(t *testing.T) {
+func TestDecoder_Consumed(t *testing.T) {
 	type entry struct {
 		rawLen int64
 		val    string
@@ -309,20 +309,20 @@ func TestUnstuffer_Consumed(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		w := NewStuffer(buf)
+		enc := NewEncoder(buf)
 		for i, e := range test.entries {
-			if _, err := w.Append([]byte(e.val)); err != nil {
+			if _, err := enc.Encode([]byte(e.val)); err != nil {
 				t.Fatalf("Consumed %q (%d): Error appending: %v", test.name, i, err)
 			}
 		}
 
-		r := NewUnstuffer(buf)
-		if r.Consumed() != 0 {
-			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, r.Consumed())
+		dec := NewDecoder(buf)
+		if dec.Consumed() != 0 {
+			t.Fatalf("Consumed %q: Unexpected non-zero consumed value %d", test.name, dec.Consumed())
 		}
 		totalConsumed := int64(0)
-		for i := 0; i < len(test.entries) && !r.Done(); i++ {
-			b, err := r.Next()
+		for i := 0; i < len(test.entries) && !dec.Done(); i++ {
+			b, err := dec.Next()
 			if err != nil {
 				t.Fatalf("Consumed %q (%d): Unexpected error reading: %v", test.name, i, err)
 			}
@@ -330,15 +330,15 @@ func TestUnstuffer_Consumed(t *testing.T) {
 				//log.Printf("want len %d, got len %d", len(test.entries[i].val), len(b))
 				t.Fatalf("Consumed %q (%d): Unexpected diff (-want +got):\n%v", test.name, i, diff)
 			}
-			if want, got := totalConsumed+test.entries[i].rawLen, r.Consumed(); want != got {
+			if want, got := totalConsumed+test.entries[i].rawLen, dec.Consumed(); want != got {
 				t.Fatalf("Consumed %q (%d): Wanted %d consumed, got %d", test.name, i, want, got)
 			}
-			totalConsumed = r.Consumed()
+			totalConsumed = dec.Consumed()
 		}
 	}
 }
 
-func TestReverseUnstuffer(t *testing.T) {
+func TestReverseDecoder(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -389,7 +389,7 @@ func TestReverseUnstuffer(t *testing.T) {
 	}
 
 	for _, test := range cases {
-		u := NewReverseUnstuffer(bytes.NewReader([]byte(test.raw)), int64(len(test.raw)))
+		u := NewReverseDecoder(bytes.NewReader([]byte(test.raw)), int64(len(test.raw)))
 		var got []string
 		errs := 0
 		for !u.Done() {
@@ -402,16 +402,16 @@ func TestReverseUnstuffer(t *testing.T) {
 		}
 
 		if test.errs != errs {
-			t.Fatalf("ReverseUnstuffer %q: expected %d errors, got %d", test.name, test.errs, errs)
+			t.Fatalf("ReverseDecoder %q: expected %d errors, got %d", test.name, test.errs, errs)
 		}
 
 		if diff := cmp.Diff(test.want, got); diff != "" {
-			t.Errorf("ReverseUnstuffer %q: unexpected diff (-want +got):\n%v", test.name, diff)
+			t.Errorf("ReverseDecoder %q: unexpected diff (-want +got):\n%v", test.name, diff)
 		}
 	}
 }
 
-func TestReverseUnstuffer_LongEntries(t *testing.T) {
+func TestReverseDecoder_LongEntries(t *testing.T) {
 	cases := []struct {
 		name string
 		msgs []string // we always want them in reverse
@@ -439,30 +439,30 @@ func TestReverseUnstuffer_LongEntries(t *testing.T) {
 
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
-		s := NewStuffer(buf)
+		s := NewEncoder(buf)
 		for _, msg := range test.msgs {
-			if _, err := s.Append([]byte(msg)); err != nil {
-				t.Fatalf("ReverseUnstuffer long entries %q append: %v", test.name, err)
+			if _, err := s.Encode([]byte(msg)); err != nil {
+				t.Fatalf("ReverseDecoder long entries %q append: %v", test.name, err)
 			}
 		}
 
-		u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		u := NewReverseDecoder(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 		var reverseGot []string
 		for !u.Done() {
 			b, err := u.Next()
 			if err != nil {
-				t.Fatalf("ReverseUnstuffer long entries %q next: %v", test.name, err)
+				t.Fatalf("ReverseDecoder long entries %q next: %v", test.name, err)
 			}
 			reverseGot = append([]string{string(b)}, reverseGot...)
 		}
 
 		if diff := cmp.Diff(test.msgs, reverseGot); diff != "" {
-			t.Errorf("ReverseUnstuffer long entries %q unexpected diff (-want +reverseGot):\n%v", test.name, diff)
+			t.Errorf("ReverseDecoder long entries %q unexpected diff (-want +reverseGot):\n%v", test.name, diff)
 		}
 	}
 }
 
-func ExampleReverseUnstuffer() {
+func ExampleReverseDecoder() {
 	msgs := []string{
 		"Message 1",
 		"Message 2",
@@ -472,14 +472,14 @@ func ExampleReverseUnstuffer() {
 
 	buf := new(bytes.Buffer)
 
-	s := NewStuffer(buf)
+	s := NewEncoder(buf)
 	for _, msg := range msgs {
-		if _, err := s.Append([]byte(msg)); err != nil {
+		if _, err := s.Encode([]byte(msg)); err != nil {
 			log.Fatalf("Error appending: %v", err)
 		}
 	}
 
-	u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	u := NewReverseDecoder(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 	for !u.Done() {
 		b, err := u.Next()
 		if err != nil {

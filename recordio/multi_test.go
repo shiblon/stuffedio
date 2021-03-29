@@ -1,4 +1,4 @@
-package stuffedio
+package recordio
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestMultiUnstuffer_Consumed(t *testing.T) {
+func TestMultiDecoder_Consumed(t *testing.T) {
 	cases := []struct {
 		name string
 		msgs []string
@@ -34,18 +34,18 @@ func TestMultiUnstuffer_Consumed(t *testing.T) {
 
 	for _, test := range cases {
 		// Place one messae into each unstuffer, then multi-bundle them.
-		var components []*Unstuffer
+		var components []*Decoder
 		for _, msg := range test.msgs {
 			buf := new(bytes.Buffer)
-			s := NewStuffer(buf)
-			if _, err := s.Append([]byte(msg)); err != nil {
+			s := NewEncoder(buf)
+			if _, err := s.Encode([]byte(msg)); err != nil {
 				t.Fatalf("%q: error appending: %v", test.name, err)
 			}
-			components = append(components, NewUnstuffer(buf))
+			components = append(components, NewDecoder(buf))
 		}
 
 		// Consume everything from a multi unstuffer.
-		m := NewMultiUnstuffer(components)
+		m := NewMultiDecoder(components)
 		for !m.Done() {
 			if _, err := m.Next(); err != nil {
 				t.Fatalf("%q: failed next: %v", test.name, err)

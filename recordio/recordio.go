@@ -1,29 +1,29 @@
-// Package stuffedio implements a straightforward self-synchronizing log using
+// Package recordio implements a straightforward self-synchronizing log using
 // consistent-overhead word stuffing (yes, COWS) as described in Paul Khuong's
 // https://www.pvk.ca/Blog/2021/01/11/stuff-your-logs/.
 //
 // Stuffed Logs
 //
-// This package contains a very simple Unstuffer and Stuffer that can be used
+// This package contains a very simple Decoder and Encoder that can be used
 // to write delimited records into a log. It has no opinions about the content
 // of those records.
 //
-// Thus, you can write arbitrary bytes to a Stuffer and it will delimit them
+// Thus, you can write arbitrary bytes to an Encoder and it will delimit them
 // appropriately, and in a way that---by construction---guarantees that the
 // delimiter will not appear anywhere in the record. This makes it a
 // self-synchronizing file format: you can always find the next record by
 // searching for the delimiter.
 //
-// Using the Unstuffer/Stuffer interface, of course, does not require understanding
+// Using the Decoder/Encoder interface, of course, does not require understanding
 // what it is doing underneath. If you want to write to a file, you can simply
-// open it for appending and wrap it in a Stuffer:
+// open it for appending and wrap it in a Encoder:
 //
 //   f, err := os.OpenFile(mypath, os.RDWR|os.CREATE|os.APPEND, 0755)
 //   if err != nil {
 //     log.Fatalf("Error opening: %v", err)
 //   }
-//   s := NewStuffer(f)
-//   defer s.Close()
+//   e := NewEncoder(f)
+//   defer e.Close()
 //
 //   msgs := []string{
 //     "msg 1",
@@ -32,7 +32,7 @@
 //   }
 //
 //   for _, msg := range msgs {
-//     if _, err := s.Append(msg); err != nil {
+//     if _, err := e.Encode(msg); err != nil {
 //       log.Fatalf("Error appending: %v", err)
 //     }
 //   }
@@ -43,11 +43,11 @@
 //   if err != nil {
 //     log.Fatalf("Error opening: %v", err)
 //   }
-//   u := NewUnstuffer(f)
-//   defer u.Close()
+//   d := NewDecoder(f)
+//   defer d.Close()
 //
-//   for !u.Done() {
-//     b, err := u.Next()
+//   for !d.Done() {
+//     b, err := d.Next()
 //     if err != nil {
 //       log.Fatalf("Error reading: %v", err)
 //     }
@@ -63,16 +63,16 @@
 // To manage sharded reads, you might structure code something like this.
 //
 //   func processShard(r io.Reader, nominalLength int) error {
-//     u := NewUnstuffer(r)
+//     d := NewDecoder(r)
 //     // If we're in the middle of a record, skip to the next full one.
-//     if err := u.SkipPartial(); err != nil {
+//     if err := d.SkipPartial(); err != nil {
 //       return fmt.Errorf("process shard skip: %w", err)
 //     }
 //     // Read until finished or until we exceed the shard length.
 //     // The final record inside the shard is likely going to extend
 //     // past the length a little, which is fine.
-//     for !u.Done() && u.Consumed() < nominalLength {
-//       b, err := u.Next()
+//     for !d.Done() && d.Consumed() < nominalLength {
+//       b, err := d.Next()
 //       if err != nil {
 //         return fmt.Errorf("process shard next: %w", err)
 //       }
@@ -123,74 +123,13 @@
 // opening the file multiple times for reading and seeking provides the
 // appropriate io.Reader interface for each shard.
 //
-// Write-Ahead Logs
-//
-// The package also contains a write-ahead log implementation, embodied in the WALUnstuffer
-// and WALStuffer types. These can wrap stuffed readers and writers (or other
-// kinds of readers and writers if they satisfy the proper interface).
-//
-// They are, like the simpler Unstuffer/Stuffer types, straightforward to use.
-// However, they require an index (ordinal) to be passed for each entry when
-// writing, and these indices are returned when reading.
-//
-// Additionally, each record has a checksum associated with it, and during
-// reads, those checksums are checked.
-//
-// Repeated indices are allowed, with only the first valid record for that
-// indicdes being returned on read.
-//
-// The first record's index must be 1 or higher. Options allow a specific
-// starting index to be enforced (e.g., when the file name indicates the
-// starting point of the log, one can specify that starting point when reading
-// and receive an error if it is long).
-//
-// Indices must be in sequence, with the exception of repeats.
-//
-// An example of how this works is below:
-//
-//	buf := new(bytes.Buffer)
-//	s := NewStuffer(buf).WAL()
-//
-//	// Write messages.
-//	msgs := []string{
-//		"This is a message",
-//		"This is another message",
-//		"And here's a third",
-//	}
-//
-//	for i, msg := range msgs {
-//		if _, err := s.Append(uint64(i)+1, []byte(msg)); err != nil {
-//			log.Fatalf("Append error: %v", err)
-//		}
-//	}
-//
-//	// Now read them back.
-//	u := NewUnstuffer(buf).WAL()
-//	defer u.Close()
-//	for !u.Done() {
-//		idx, val, err := u.Next()
-//		if err != nil {
-//			log.Fatalf("Read error: %v", err)
-//		}
-//		fmt.Printf("%d: %q\n", idx, string(val))
-//	}
-//
-//	// Output:
-//	// 1: "This is a message"
-//	// 2: "This is another message"
-//	// 3: "And here's a third"
-//
-// MultiUnstuffer
+// MultiDecoder
 //
 // If you wish to implement, say, a write-ahead log over multiple ordered
-// readers (effectively concatenating them), there is a MultiUnstuffer
+// readers (effectively concatenating them), there is a MultiDecoder
 // implementation contained here. There is also a handy file iterator that can
-// be used to provide on-demand file opening for the MultiUnstuffer.
-//
-// The files themselves are packages into simple Unstuffer types, and then the
-// WALUnstuffer can be used on top of that, preserving all of the WAL logic over
-// top of a concatenated set of stuffed readers.
-package stuffedio // import "entrogo.com/stuffedio"
+// be used to provide on-demand file opening for the MultiDecoder.
+package recordio // import "entrogo.com/stuffedio/recordio"
 
 import (
 	"bytes"
@@ -216,15 +155,15 @@ var (
 	CorruptRecord = fmt.Errorf("corrupt record")
 )
 
-// Stuffer wraps an underlying writer and appends records to the stream when
+// Encoder wraps an underlying writer and appends records to the stream when
 // requested, encoding them using constant-overhead word stuffing.
-type Stuffer struct {
+type Encoder struct {
 	dest io.Writer
 }
 
-// NewStuffer creates a new Stuffer with the underlying output writer.
-func NewStuffer(dest io.Writer) *Stuffer {
-	return &Stuffer{
+// NewEncoder creates a new Encoder with the underlying output writer.
+func NewEncoder(dest io.Writer) *Encoder {
+	return &Encoder{
 		dest: dest,
 	}
 }
@@ -252,10 +191,10 @@ func findReserved(p []byte, end int) (int, bool) {
 	return end, false
 }
 
-// Append adds a record to the end of the underlying writer. It encodes it
+// Encode adds a record to the end of the underlying writer. It encodes it
 // using word stuffing. It returns the actual number of bytes written, which
 // will always be slightly more than requested if there is no error.
-func (s *Stuffer) Append(p []byte) (int, error) {
+func (e *Encoder) Encode(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -312,22 +251,22 @@ func (s *Stuffer) Append(p []byte) (int, error) {
 		}
 	}
 	size := buf.Len()
-	if _, err := io.Copy(s.dest, buf); err != nil {
+	if _, err := io.Copy(e.dest, buf); err != nil {
 		return 0, fmt.Errorf("write rec: %w", err)
 	}
 	return size, nil
 }
 
 // Close cleans up the underlying streams. If the underlying stream is also an io.Closer, it will close it.
-func (s *Stuffer) Close() error {
-	if c, ok := s.dest.(io.Closer); ok {
+func (e *Encoder) Close() error {
+	if c, ok := e.dest.(io.Closer); ok {
 		return c.Close()
 	}
 	return nil
 }
 
-// Unstuffer wraps an io.Reader and allows full records to be pulled at once.
-type Unstuffer struct {
+// Decoder wraps an io.Reader and allows full records to be pulled at once.
+type Decoder struct {
 	src      io.Reader
 	buf      []byte
 	consumed int64 // number of bytes actually consumed by the decoder.
@@ -336,10 +275,10 @@ type Unstuffer struct {
 	ended    bool  // EOF reached, don't read again.
 }
 
-// NewUnstuffer creates an Unstuffer from the given src, which is assumed to be
+// NewDecoder creates an Decoder from the given src, which is assumed to be
 // a word-stuffed log.
-func NewUnstuffer(src io.Reader) *Unstuffer {
-	return &Unstuffer{
+func NewDecoder(src io.Reader) *Decoder {
+	return &Decoder{
 		src: src,
 		buf: make([]byte, 1<<17),
 	}
@@ -347,84 +286,84 @@ func NewUnstuffer(src io.Reader) *Unstuffer {
 
 // fillBuf ensures that the internal buffer is at least half full, which is
 // enough space for one short read and one long read.
-func (u *Unstuffer) fillBuf() error {
-	if u.ended {
+func (d *Decoder) fillBuf() error {
+	if d.ended {
 		return nil // just use pos/end, no more reading.
 	}
-	if u.end-u.pos >= len(u.buf)/2 {
+	if d.end-d.pos >= len(d.buf)/2 {
 		// Don't bother filling if it's at least half full.
 		// The buffer is designed to
 		return nil
 	}
 	// Room to move, shift left.
-	if u.pos != 0 {
-		copy(u.buf[:], u.buf[u.pos:u.end])
+	if d.pos != 0 {
+		copy(d.buf[:], d.buf[d.pos:d.end])
 	}
-	u.end -= u.pos
-	u.pos = 0
+	d.end -= d.pos
+	d.pos = 0
 
 	// Read as much as possible.
-	n, err := u.src.Read(u.buf[u.end:])
+	n, err := d.src.Read(d.buf[d.end:])
 	if err != nil {
 		if err != io.EOF {
 			return fmt.Errorf("fill buffer: %w", err)
 		}
-		u.ended = true
+		d.ended = true
 	}
-	u.end += n
-	if u.end < len(u.buf) {
+	d.end += n
+	if d.end < len(d.buf) {
 		// Assume a short read means there's no more data.
-		u.ended = true
+		d.ended = true
 	}
 	return nil
 }
 
 // advance moves the pos pointer forward by n bytes.
 // Silently fails to move all the way if it encounters end first.
-func (u *Unstuffer) advance(n int) {
-	u.pos += n
-	u.consumed += int64(n)
+func (d *Decoder) advance(n int) {
+	d.pos += n
+	d.consumed += int64(n)
 }
 
 // bufLen indicates how many bytes are available in the buffer.
-func (u *Unstuffer) bufLen() int {
-	return u.end - u.pos
+func (d *Decoder) bufLen() int {
+	return d.end - d.pos
 }
 
 // bufData returns a slice of the buffer contents in [pos, end).
-func (u *Unstuffer) bufData() []byte {
-	return u.buf[u.pos:u.end]
+func (d *Decoder) bufData() []byte {
+	return d.buf[d.pos:d.end]
 }
 
 // Consumed returns the number of bytes consumed from the underlying stream (not read, used).
-func (u *Unstuffer) Consumed() int64 {
-	return u.consumed
+func (d *Decoder) Consumed() int64 {
+	return d.consumed
 }
 
 // discardLeader advances the position of the buffer, only if it contains a leading delimiter.
-func (u *Unstuffer) discardLeader() bool {
-	if u.end-u.pos < len(reserved) {
+func (d *Decoder) discardLeader() bool {
+	if d.end-d.pos < len(reserved) {
 		return false
 	}
-	if bytes.Equal(reserved, u.bufData()[:len(reserved)]) {
-		u.advance(len(reserved))
+	if bytes.Equal(reserved, d.bufData()[:len(reserved)]) {
+		d.advance(len(reserved))
 		return true
 	}
 	return false
 }
 
-func (u *Unstuffer) atDelimiter() bool {
-	return isDelimiter(u.bufData(), 0)
+func (d *Decoder) atDelimiter() bool {
+	return isDelimiter(d.bufData(), 0)
 }
 
 // Done indicates whether the underlying stream is exhausted and all records are returned.
-func (u *Unstuffer) Done() bool {
-	return u.end == u.pos && u.ended
+func (d *Decoder) Done() bool {
+	return d.end == d.pos && d.ended
 }
 
 // Close closes the underlying stream, if it happens to implement io.Closer.
-func (u *Unstuffer) Close() error {
-	if c, ok := u.src.(io.Closer); ok {
+func (d *Decoder) Close() error {
+	if c, ok := d.src.(io.Closer); ok {
 		return c.Close()
 	}
 	return nil
@@ -434,30 +373,30 @@ func (u *Unstuffer) Close() error {
 // It conumes them from the buffer. It does not read from the source: ensure
 // that the buffer is full enough to proceed before calling. It can only go up
 // to the penultimate byte, to ensure that it doesn't read half a delimiter.
-func (u *Unstuffer) scanN(n int) []byte {
+func (d *Decoder) scanN(n int) []byte {
 	// Ensure that we don't go beyond the end of the buffer. The caller should
 	// never ask for more than this. But it can happen if, for example, the
 	// underlying stream is exhausted on a final block, with only the implicit
 	// delimiter.
-	if size := u.bufLen(); n > size {
+	if size := d.bufLen(); n > size {
 		n = size
 	}
-	start := u.pos
+	start := d.pos
 	for i := 0; i < n; i++ {
-		if u.atDelimiter() {
+		if d.atDelimiter() {
 			break
 		}
-		u.advance(1)
+		d.advance(1)
 	}
-	return u.buf[start:u.pos]
+	return d.buf[start:d.pos]
 }
 
 // discardToDelimiter attempts to read until it finds a delimiter. Assumes that
 // the buffer begins full. It may be filled again, in here.
-func (u *Unstuffer) discardToDelimiter() error {
-	for !u.atDelimiter() && !u.Done() {
-		u.scanN(u.bufLen())
-		if err := u.fillBuf(); err != nil {
+func (d *Decoder) discardToDelimiter() error {
+	for !d.atDelimiter() && !d.Done() {
+		d.scanN(d.bufLen())
+		if err := d.fillBuf(); err != nil {
 			return fmt.Errorf("discard: %w", err)
 		}
 	}
@@ -467,14 +406,14 @@ func (u *Unstuffer) discardToDelimiter() error {
 // SkipPartial moves forward through the log until it finds a delimiter, if it
 // isn't already on one. Can be used, for example, to get shards started on a
 // record boundary without first getting a corruption error.
-func (u *Unstuffer) SkipPartial() error {
-	if u.Done() {
+func (d *Decoder) SkipPartial() error {
+	if d.Done() {
 		return nil
 	}
-	if err := u.fillBuf(); err != nil {
+	if err := d.fillBuf(); err != nil {
 		return fmt.Errorf("skip partial: %w", err)
 	}
-	if err := u.discardToDelimiter(); err != nil {
+	if err := d.discardToDelimiter(); err != nil {
 		return fmt.Errorf("skip partial: %w", err)
 	}
 	return nil
@@ -486,29 +425,29 @@ func (u *Unstuffer) SkipPartial() error {
 // can skip bytes until it finds a new one. It does not require the first
 // record to begin with a delimiter. Returns a wrapped io.EOF when complete.
 // More idiomatically, check Done after every iteration.
-func (u *Unstuffer) Next() ([]byte, error) {
+func (d *Decoder) Next() ([]byte, error) {
 	buf := new(bytes.Buffer)
-	if err := u.fillBuf(); err != nil {
+	if err := d.fillBuf(); err != nil {
 		return nil, fmt.Errorf("next: %w", err)
 	}
-	if u.Done() {
+	if d.Done() {
 		return nil, io.EOF
 	}
 
-	if !u.discardLeader() {
+	if !d.discardLeader() {
 		// Find the first real delimiter for next time. This can help get
 		// things on track after a corrupt record, or at the start of a shard
 		// that comes in the middle of a record. We strictly require every
 		// record to be prefixed with the delimiter, including the first,
 		// allowing this logic to work properly.
-		if err := u.discardToDelimiter(); err != nil {
+		if err := d.discardToDelimiter(); err != nil {
 			return nil, fmt.Errorf("next: error discarding to next delimiter after corruption: %w", err)
 		}
 		return nil, fmt.Errorf("next: no leading delimiter in record: %w", CorruptRecord)
 	}
 
 	// Read the first (small) section.
-	b := u.scanN(1)
+	b := d.scanN(1)
 	if len(b) != 1 {
 		return nil, fmt.Errorf("next: short read on size byte: %w", CorruptRecord)
 	}
@@ -531,7 +470,7 @@ func (u *Unstuffer) Next() ([]byte, error) {
 	// the return value. It can be wrong. In that case, return a meaningful
 	// error so the caller can decide whether to keep going with the next
 	// record.
-	b = u.scanN(smallSize)
+	b = d.scanN(smallSize)
 	if len(b) != smallSize {
 		return nil, fmt.Errorf("next: wanted short %d, got %d: %w", smallSize, len(b), CorruptRecord)
 	}
@@ -547,12 +486,12 @@ func (u *Unstuffer) Next() ([]byte, error) {
 	}
 
 	// Now we read zero or more large sections, stopping when we hit a delimiter or the end of the input stream.
-	for !u.atDelimiter() && !u.Done() {
-		if err := u.fillBuf(); err != nil {
+	for !d.atDelimiter() && !d.Done() {
+		if err := d.fillBuf(); err != nil {
 			return nil, fmt.Errorf("next: %w", err)
 		}
 		// Extract 2 size bytes, convert using the radix.
-		b := u.scanN(2)
+		b := d.scanN(2)
 		if len(b) != 2 {
 			return nil, fmt.Errorf("next: short read on size bytes: %w", CorruptRecord)
 		}
@@ -565,7 +504,7 @@ func (u *Unstuffer) Next() ([]byte, error) {
 		}
 		// New record segment, recalculate.
 		lastIsFull = size == largeLimit
-		b = u.scanN(size)
+		b = d.scanN(size)
 		if len(b) != size {
 			return nil, fmt.Errorf("next: wanted long %d, got %d: %w", size, len(b), CorruptRecord)
 		}
@@ -597,49 +536,49 @@ func (u *Unstuffer) Next() ([]byte, error) {
 	return buf.Bytes()[:end], nil
 }
 
-// ReverseUnstuffer can be used on an io.ReaderAt to read stuffed records in reverse.
+// ReverseDecoder can be used on an io.ReaderAt to read stuffed records in reverse.
 // It does so by searching backwards for delimiters, and then reading them
 // forward from there. Reproduces errors in the same way that a forward reader would.
-type ReverseUnstuffer struct {
+type ReverseDecoder struct {
 	src   io.ReaderAt
 	rSize int64
 
 	pos int64
 }
 
-// NewReverseUnstuffer creates a new unstuffer that works in reverse. Because
+// NewReverseDecoder creates a new unstuffer that works in reverse. Because
 // ReaderAt doesn't supply a size, and there are no good standard interfaces to
 // depend on for this, it is required to indicate how long the underlying data
 // is for the io.ReaderAt. This allows the reverse reader to start at the end.
-func NewReverseUnstuffer(r io.ReaderAt, size int64) *ReverseUnstuffer {
-	u := &ReverseUnstuffer{
+func NewReverseDecoder(r io.ReaderAt, size int64) *ReverseDecoder {
+	d := &ReverseDecoder{
 		src:   r,
 		rSize: size,
 		pos:   size,
 	}
-	return u
+	return d
 }
 
 // Done indicates whether this reverse unstuffer has reached (and produced) the
 // first record in the underlying reader.
-func (u *ReverseUnstuffer) Done() bool {
-	return u.pos == 0
+func (d *ReverseDecoder) Done() bool {
+	return d.pos == 0
 }
 
 // Next attempts to find and produce the next record in reverse in the
 // underlying stream.
-func (u *ReverseUnstuffer) Next() ([]byte, error) {
-	if u.Done() {
+func (d *ReverseDecoder) Next() ([]byte, error) {
+	if d.Done() {
 		return nil, fmt.Errorf("reverse unstuff next: %w", io.EOF)
 	}
-	end := u.pos
+	end := d.pos
 	start := end
 	for end >= int64(len(reserved)) {
 		off := end - 1<<17
 		if off < 0 {
 			off = 0
 		}
-		r := io.NewSectionReader(u.src, off, end-off)
+		r := io.NewSectionReader(d.src, off, end-off)
 		buf := make([]byte, end-off)
 		if _, err := r.Read(buf); err != nil {
 			return nil, fmt.Errorf("reverse section read: %w", err)
@@ -663,15 +602,15 @@ func (u *ReverseUnstuffer) Next() ([]byte, error) {
 	}
 
 	if end < int64(len(reserved)) {
-		u.pos = 0 // can't get another record, make Done return true.
+		d.pos = 0 // can't get another record, make Done return true.
 		return nil, fmt.Errorf("reverse unstuff, missing leading delimiter: %w", CorruptRecord)
 	}
 
 	// Found one, at absolute position "start". Now we try to emit that
 	// record. We also keep track of where we found it, so that we can
 	// search backward next time, as well.
-	u.pos = start
-	b, err := NewUnstuffer(io.NewSectionReader(u.src, start, u.rSize-start)).Next()
+	d.pos = start
+	b, err := NewDecoder(io.NewSectionReader(d.src, start, d.rSize-start)).Next()
 	if err != nil {
 		return nil, fmt.Errorf("reverse unstuff from offset %d: %w", start, err)
 	}
@@ -679,8 +618,8 @@ func (u *ReverseUnstuffer) Next() ([]byte, error) {
 }
 
 // Close closes the underlying reader if it is also an io.Closer.
-func (u *ReverseUnstuffer) Close() error {
-	if c, ok := u.src.(io.Closer); ok {
+func (d *ReverseDecoder) Close() error {
+	if c, ok := d.src.(io.Closer); ok {
 		return c.Close()
 	}
 	return nil

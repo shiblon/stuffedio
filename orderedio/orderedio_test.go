@@ -1,4 +1,4 @@
-package stuffedio
+package orderedio
 
 import (
 	"bytes"
@@ -7,12 +7,13 @@ import (
 	"math/rand"
 	"testing"
 
+	"entrogo.com/stuffedio/recordio"
 	"github.com/google/go-cmp/cmp"
 )
 
 func ExampleReadWrite() {
 	buf := new(bytes.Buffer)
-	w := NewStuffer(buf).WAL()
+	e := NewEncoder(recordio.NewEncoder(buf))
 
 	// Write messages.
 	msgs := []string{
@@ -22,15 +23,15 @@ func ExampleReadWrite() {
 	}
 
 	for i, msg := range msgs {
-		if _, err := w.Append(uint64(i)+1, []byte(msg)); err != nil {
-			log.Fatalf("Append error: %v", err)
+		if _, err := e.Encode(uint64(i)+1, []byte(msg)); err != nil {
+			log.Fatalf("Encode error: %v", err)
 		}
 	}
 
 	// Now read them back.
-	r := NewUnstuffer(buf).WAL()
-	for !r.Done() {
-		idx, val, err := r.Next()
+	d := NewDecoder(recordio.NewDecoder(buf))
+	for !d.Done() {
+		idx, val, err := d.Next()
 		if err != nil {
 			log.Fatalf("Read error: %v", err)
 		}
@@ -43,7 +44,7 @@ func ExampleReadWrite() {
 	// 3: "And here's a third"
 }
 
-func TestWAL(t *testing.T) {
+func TestOrdered(t *testing.T) {
 	type entry struct {
 		i   uint64
 		val string
@@ -131,18 +132,18 @@ func TestWAL(t *testing.T) {
 		buf := new(bytes.Buffer)
 
 		// Test writes.
-		w := NewWALStuffer(NewStuffer(buf), WithFirstIndex(test.writeFirstIndex))
+		e := NewEncoder(recordio.NewEncoder(buf), WithFirstIndex(test.writeFirstIndex))
 
 		var writeErr error
 		for _, entry := range test.entries {
-			if _, err := w.Append(entry.i, []byte(entry.val)); err != nil {
+			if _, err := e.Encode(entry.i, []byte(entry.val)); err != nil {
 				writeErr = err
 			}
 		}
 		if writeErr != nil && !test.writeError {
-			t.Fatalf("WAL %q: unexpected error: %v", test.name, writeErr)
+			t.Fatalf("Ordered %q: unexpected error: %v", test.name, writeErr)
 		} else if writeErr == nil && test.writeError {
-			t.Fatalf("WAL %q: expected error, got none", test.name)
+			t.Fatalf("Ordered %q: expected error, got none", test.name)
 		}
 
 		// No point in reading - we expected an error.
@@ -164,35 +165,35 @@ func TestWAL(t *testing.T) {
 		}
 
 		// Test reads.
-		r := NewWALUnstuffer(NewUnstuffer(buf), ExpectFirstIndex(test.readInitialIndex))
+		d := NewDecoder(recordio.NewDecoder(buf), ExpectFirstIndex(test.readInitialIndex))
 
 		entryIdx := 0
 		var readErr error
-		for !r.Done() {
-			index, val, err := r.Next()
+		for !d.Done() {
+			index, val, err := d.Next()
 			if err != nil {
 				readErr = err
 				continue
 			}
 			expected := test.entries[entryIdx]
 			if index != expected.i {
-				t.Fatalf("WAL %q: read index expected %d, got %d", test.name, expected.i, index)
+				t.Fatalf("Ordered %q: read index expected %d, got %d", test.name, expected.i, index)
 			}
 			if diff := cmp.Diff(expected.val, string(val)); diff != "" {
-				t.Fatalf("WAL %q: unexpected diff in read val (-want +got):\n%v", test.name, diff)
+				t.Fatalf("Ordered %q: unexpected diff in read val (-want +got):\n%v", test.name, diff)
 			}
 			entryIdx++
 		}
 
 		if readErr != nil && !test.readError {
-			t.Fatalf("WAL %q: unexpected read error: %v", test.name, readErr)
+			t.Fatalf("Ordered %q: unexpected read error: %v", test.name, readErr)
 		} else if readErr == nil && test.readError {
-			t.Fatalf("WAL %q: expected error, got none", test.name)
+			t.Fatalf("Ordered %q: expected error, got none", test.name)
 		}
 	}
 }
 
-func TestWAL_descending(t *testing.T) {
+func TestOrdered_descending(t *testing.T) {
 	cases := []struct {
 		name string
 		vals []string
@@ -210,25 +211,28 @@ func TestWAL_descending(t *testing.T) {
 	for _, test := range cases {
 		buf := new(bytes.Buffer)
 
-		s := NewStuffer(buf).WAL()
+		s := NewEncoder(recordio.NewEncoder(buf))
 		for i, val := range test.vals {
-			if _, err := s.Append(uint64(i+1), []byte(val)); err != nil {
-				t.Fatalf("WAL descending %q append: %v", test.name, err)
+			if _, err := s.Encode(uint64(i+1), []byte(val)); err != nil {
+				t.Fatalf("Ordered descending %q append: %v", test.name, err)
 			}
 		}
 
-		u := NewReverseUnstuffer(bytes.NewReader(buf.Bytes()), int64(buf.Len())).WAL()
+		u := NewDecoder(
+			recordio.NewReverseDecoder(bytes.NewReader(buf.Bytes()), int64(buf.Len())),
+			ExpectDescending(),
+		)
 		nextIdx := uint64(len(test.vals))
 		for !u.Done() {
 			i, b, err := u.Next()
 			if err != nil {
-				t.Fatalf("WAL descending %q next: %v", test.name, err)
+				t.Fatalf("Ordered descending %q next: %v", test.name, err)
 			}
 			if i != nextIdx {
-				t.Fatalf("WAL descending %q: want index %d, got %d", test.name, nextIdx, i)
+				t.Fatalf("Ordered descending %q: want index %d, got %d", test.name, nextIdx, i)
 			}
 			if string(b) != test.vals[i-1] {
-				t.Fatalf("WAL descending %q: want val %q, got %q", test.name, test.vals[i-1], b)
+				t.Fatalf("Ordered descending %q: want val %q, got %q", test.name, test.vals[i-1], b)
 			}
 			nextIdx--
 		}

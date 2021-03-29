@@ -13,7 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"entrogo.com/stuffedio"
+	"entrogo.com/stuffedio/orderedio"
+	"entrogo.com/stuffedio/recordio"
 )
 
 const (
@@ -161,11 +162,11 @@ type WAL struct {
 
 	snapshotWasLast bool // If the snapshot was the last thing read (no later journals).
 
-	currSize    int64                 // Current size of current journal file.
-	currCount   int                   // Current number of indices in current journal file.
-	currMeta    *FileMeta             // Current info about the live journal.
-	nextIndex   uint64                // Keep track of what the next record's index should be.
-	currStuffer *stuffedio.WALStuffer // The current stuffer, can be rotated on write.
+	currSize    int64              // Current size of current journal file.
+	currCount   int                // Current number of indices in current journal file.
+	currMeta    *FileMeta          // Current info about the live journal.
+	nextIndex   uint64             // Keep track of what the next record's index should be.
+	currEncoder *orderedio.Encoder // The current encoder, can be rotated on write.
 }
 
 // FileMeta contains information about a file entry in the log directory.
@@ -292,12 +293,15 @@ func (w *WAL) maybeInitLiveJournal(inf *dirInfo) error {
 			return fmt.Errorf("init live from file: %w", err)
 		}
 		w.currMeta = live
-		w.currStuffer = stuffedio.NewStuffer(f).WAL(stuffedio.WithFirstIndex(w.nextIndex))
+		w.currEncoder = orderedio.NewEncoder(
+			recordio.NewEncoder(f),
+			orderedio.WithFirstIndex(w.nextIndex),
+		)
 		return nil
 	}
 
 	// No live journal file, time to make one. We can do that by rotating. We
-	// have a nil currStuffer, and the last index of the last thing read is
+	// have a nil currEncoder, and the last index of the last thing read is
 	// known.
 	if err := w.rotate(); err != nil {
 		return fmt.Errorf("init live new rotate: %w", err)
@@ -466,9 +470,9 @@ func (w *WAL) loadSnapshot(fsys fs.FS, inf *dirInfo) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open wal open snapshot: %w", err)
 	}
-	u := stuffedio.NewUnstuffer(f).WAL()
-	for !u.Done() {
-		idx, b, err := u.Next()
+	dec := orderedio.NewDecoder(recordio.NewDecoder(f))
+	for !dec.Done() {
+		idx, b, err := dec.Next()
 		if err != nil {
 			return false, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
 		}
@@ -489,7 +493,7 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 		return false, nil
 	}
 
-	// Note that we don't use the files iterator and multi unstuffer because
+	// Note that we don't use the files iterator and multi decoder because
 	// we need filenames all the way along the process, to check that indices match.
 	// So we implement some of the loops here by hand instead.
 	for _, m := range toPlay {
@@ -509,12 +513,12 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 		}
 		w.currSize = fi.Size()
 
-		u := stuffedio.NewUnstuffer(f).WAL()
-		defer u.Close()
+		dec := orderedio.NewDecoder(recordio.NewDecoder(f))
+		defer dec.Close()
 
 		checked := false
-		for !u.Done() {
-			idx, b, err := u.Next()
+		for !dec.Done() {
+			idx, b, err := dec.Next()
 			if err != nil {
 				return false, fmt.Errorf("play journal next: %w", err)
 			}
@@ -547,15 +551,15 @@ func (w *WAL) Append(b []byte) error {
 	if !w.allowWrite {
 		return fmt.Errorf("wal append: not opened for appending, read-only")
 	}
-	if w.currStuffer == nil {
-		return fmt.Errorf("wal append: no current journal stuffer")
+	if w.currEncoder == nil {
+		return fmt.Errorf("wal append: no current journal encoder")
 	}
 	if w.timeToRotate() {
 		if err := w.rotate(); err != nil {
 			return fmt.Errorf("append rotate if ready: %v", err)
 		}
 	}
-	n, err := w.currStuffer.Append(w.nextIndex, b)
+	n, err := w.currEncoder.Encode(w.nextIndex, b)
 	if err != nil {
 		return fmt.Errorf("wal append: %w", err)
 	}
@@ -576,9 +580,9 @@ func (w *WAL) CurrIndex() uint64 {
 // Close cleans up any open resources. Live journals are left live, however,
 // for next time. To ensure that live journals get finalized, call Finalize.
 func (w *WAL) Close() error {
-	if w.currStuffer != nil {
-		err := w.currStuffer.Close()
-		w.currStuffer = nil
+	if w.currEncoder != nil {
+		err := w.currEncoder.Close()
+		w.currEncoder = nil
 		return err
 	}
 	return nil
@@ -590,7 +594,7 @@ func (w *WAL) Finalize() error {
 	if !w.allowWrite {
 		return fmt.Errorf("wal finalize: can't finalize a read-only log")
 	}
-	if w.currStuffer == nil {
+	if w.currEncoder == nil {
 		return fmt.Errorf("wal finalize: no live journal to finalize")
 	}
 
@@ -619,15 +623,15 @@ func (w *WAL) finalizeLiveJournal() error {
 	if !w.allowWrite {
 		return fmt.Errorf("finalize impl: cannot finalize if writing is not allowed")
 	}
-	if w.currStuffer == nil {
+	if w.currEncoder == nil {
 		return nil
 	}
 	if w.currMeta == nil {
-		return fmt.Errorf("finalize impl: stuffer available, but meta not - should never happen")
+		return fmt.Errorf("finalize impl: encoder available, but meta not - should never happen")
 	}
-	err := w.currStuffer.Close()
+	err := w.currEncoder.Close()
 	liveName := filepath.Join(w.dir, w.currMeta.Name)
-	w.currStuffer = nil
+	w.currEncoder = nil
 	w.currMeta = nil
 	if err := os.Rename(liveName, liveName+"-"+FinalSuffix); err != nil {
 		return fmt.Errorf("rotate rename live: %w", err)
@@ -635,7 +639,7 @@ func (w *WAL) finalizeLiveJournal() error {
 	return err
 }
 
-// rotate performs a file rotation, closing the current stuffer and opening a
+// rotate performs a file rotation, closing the current encoder and opening a
 // new one over a new file, if possible.
 func (w *WAL) rotate() error {
 	if !w.allowWrite {
@@ -659,8 +663,9 @@ func (w *WAL) rotate() error {
 		return fmt.Errorf("rotate new live: %w", err)
 	}
 	w.currMeta = live
-	w.currStuffer = stuffedio.NewStuffer(f).WAL(
-		stuffedio.WithFirstIndex(w.nextIndex),
+	w.currEncoder = orderedio.NewEncoder(
+		recordio.NewEncoder(f),
+		orderedio.WithFirstIndex(w.nextIndex),
 	)
 	return nil
 }
@@ -754,14 +759,14 @@ type ValueAdder interface {
 	AddValue([]byte) error
 }
 
-type journalStufferAdder struct {
-	stuffer *stuffedio.WALStuffer
+type journalEncoderAdder struct {
+	encoder *orderedio.Encoder
 	index   uint64
 }
 
 // AddValue adds a value to a snapshot.
-func (a *journalStufferAdder) AddValue(b []byte) error {
-	if _, err := a.stuffer.Append(a.index+1, b); err != nil {
+func (a *journalEncoderAdder) AddValue(b []byte) error {
+	if _, err := a.encoder.Encode(a.index+1, b); err != nil {
 		return fmt.Errorf("snapshot add value: %w", err)
 	}
 	a.index++
@@ -772,7 +777,7 @@ func (a *journalStufferAdder) AddValue(b []byte) error {
 // returns a non-nil error, the snapshot will not be finalized.
 type Snapshotter func(ValueAdder) error
 
-// CreateSnapshot creates a snapshot stuffer for writing. Checks whether it can
+// CreateSnapshot creates a snapshot encoder for writing. Checks whether it can
 // proceed first, returning an error if it is not sensible to create a
 // snapshot. Call CanSnapshot first to look before you leap.
 func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
@@ -784,14 +789,14 @@ func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}
-	adder := &journalStufferAdder{
-		stuffer: stuffedio.NewStuffer(f).WAL(),
+	adder := &journalEncoderAdder{
+		encoder: orderedio.NewEncoder(recordio.NewEncoder(f)),
 	}
 	if err := s(adder); err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)
 	}
 	// No error, close this thing and rename it.
-	adder.stuffer.Close()
+	adder.encoder.Close()
 	finalName := liveName + "-" + FinalSuffix
 	if err := os.Rename(liveName, finalName); err != nil {
 		return "", fmt.Errorf("create snapshot finalize: %w", err)
