@@ -1,6 +1,7 @@
 package wal_test
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log"
@@ -9,8 +10,8 @@ import (
 	"entrogo.com/stuffedio/wal"
 )
 
-func appendToWAL(dir string, values []string, finalize bool) error {
-	w, err := wal.Open(dir,
+func appendToWAL(ctx context.Context, dir string, values []string, finalize bool) error {
+	w, err := wal.Open(ctx, dir,
 		wal.WithAllowWrite(true),
 		wal.WithEmptySnapshotLoader(true),
 		wal.WithEmptyJournalPlayer(true),
@@ -33,13 +34,13 @@ func appendToWAL(dir string, values []string, finalize bool) error {
 	return nil
 }
 
-func readWAL(dir string) (snapshot, journal []string, err error) {
-	w, err := wal.Open(dir,
-		wal.WithSnapshotLoaderFunc(func(b []byte) error {
+func readWAL(ctx context.Context, dir string) (snapshot, journal []string, err error) {
+	w, err := wal.Open(ctx, dir,
+		wal.WithSnapshotLoaderFunc(func(_ context.Context, b []byte) error {
 			snapshot = append(snapshot, string(b))
 			return nil
 		}),
-		wal.WithJournalPlayerFunc(func(b []byte) error {
+		wal.WithJournalPlayerFunc(func(_ context.Context, b []byte) error {
 			journal = append(journal, string(b))
 			return nil
 		}),
@@ -52,15 +53,15 @@ func readWAL(dir string) (snapshot, journal []string, err error) {
 	return snapshot, journal, nil
 }
 
-func makeSnapshot(dir string) (string, error) {
+func makeSnapshot(ctx context.Context, dir string) (string, error) {
 	var values []string
-	w, err := wal.Open(dir,
+	w, err := wal.Open(ctx, dir,
 		wal.WithExcludeLiveJournal(true),
-		wal.WithJournalPlayerFunc(func(b []byte) error {
+		wal.WithJournalPlayerFunc(func(_ context.Context, b []byte) error {
 			values = append(values, string(b))
 			return nil
 		}),
-		wal.WithSnapshotLoaderFunc(func(b []byte) error {
+		wal.WithSnapshotLoaderFunc(func(_ context.Context, b []byte) error {
 			values = append(values, string(b))
 			return nil
 		}),
@@ -98,6 +99,7 @@ func mustLogFiles(dir string) {
 }
 
 func Example() {
+	ctx := context.Background()
 	// This example just makes something in tmp. Real use would use a more
 	// durable location (and not delete afterward).
 	dir, err := os.MkdirTemp("", "walex-")
@@ -107,7 +109,7 @@ func Example() {
 	defer os.RemoveAll(dir)
 
 	// Add some things to the WAL.
-	if err := appendToWAL(dir, []string{
+	if err := appendToWAL(ctx, dir, []string{
 		"Message 1",
 		"Message 2",
 		"Message 3",
@@ -117,7 +119,7 @@ func Example() {
 	}
 
 	// Read them back, also prepare to make a snapshot.
-	snapshotVals, journalVals, err := readWAL(dir)
+	snapshotVals, journalVals, err := readWAL(ctx, dir)
 	if err != nil {
 		log.Fatalf("Error reading initial WAL: %v", err)
 	}
@@ -132,13 +134,13 @@ func Example() {
 
 	// Now create a snapshot and dump values into it, based on where we ended
 	// up when in read-only mode.
-	if _, err := makeSnapshot(dir); err != nil {
+	if _, err := makeSnapshot(ctx, dir); err != nil {
 		log.Fatalf("Error creating snapshot: %v", err)
 	}
 
 	// We can now open again in write mode, and dump more things in the
 	// journal. We'll leave it "live" this time:
-	if err := appendToWAL(dir, []string{
+	if err := appendToWAL(ctx, dir, []string{
 		"Message 5",
 		"Message 6",
 	}, false); err != nil {
@@ -146,7 +148,7 @@ func Example() {
 	}
 
 	// Read the whole WAL back, which will include the snapshot and latest journal.
-	finalSnapVals, finalJVals, err := readWAL(dir)
+	finalSnapVals, finalJVals, err := readWAL(ctx, dir)
 	if err != nil {
 		log.Fatalf("Error reading final WAL: %v", err)
 	}

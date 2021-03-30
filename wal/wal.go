@@ -3,6 +3,7 @@
 package wal
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log"
@@ -32,24 +33,24 @@ var (
 
 // Player is a function type called during journal item replay.
 type Player interface {
-	Play([]byte) error
+	Play(context.Context, []byte) error
 }
 
 // Loader is a function type called during snapshot item loading.
 type Loader interface {
-	Load([]byte) error
+	Load(context.Context, []byte) error
 }
 
-type PlayerFunc func([]byte) error
+type PlayerFunc func(context.Context, []byte) error
 
-func (f PlayerFunc) Play(b []byte) error {
-	return f(b)
+func (f PlayerFunc) Play(ctx context.Context, b []byte) error {
+	return f(ctx, b)
 }
 
-type LoaderFunc func([]byte) error
+type LoaderFunc func(context.Context, []byte) error
 
-func (f LoaderFunc) Load(b []byte) error {
-	return f(b)
+func (f LoaderFunc) Load(ctx context.Context, b []byte) error {
+	return f(ctx, b)
 }
 
 // Option describes a WAL creation option.
@@ -93,7 +94,7 @@ func WithSnapshotLoader(a Loader) Option {
 }
 
 // WithSnapshotLoaderFunc sets the snapshot loader using a function.
-func WithSnapshotLoaderFunc(f func([]byte) error) Option {
+func WithSnapshotLoaderFunc(f LoaderFunc) Option {
 	return WithSnapshotLoader(LoaderFunc(f))
 }
 
@@ -106,7 +107,7 @@ func WithJournalPlayer(p Player) Option {
 }
 
 // WithJournalPlayerFunc sets the journal player using a function.
-func WithJournalPlayerFunc(f func([]byte) error) Option {
+func WithJournalPlayerFunc(f PlayerFunc) Option {
 	return WithJournalPlayer(PlayerFunc(f))
 }
 
@@ -247,7 +248,7 @@ func (d *dirInfo) hasFiles() bool {
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
 // that can be appended to over time.
-func Open(dir string, opts ...Option) (*WAL, error) {
+func Open(ctx context.Context, dir string, opts ...Option) (*WAL, error) {
 	w := &WAL{
 		dir: dir,
 
@@ -283,13 +284,13 @@ func Open(dir string, opts ...Option) (*WAL, error) {
 		return nil, fmt.Errorf("wal open deprecate: %w", err)
 	}
 
-	snapshotOK, err := w.loadSnapshot(fsys, dInf)
+	snapshotOK, err := w.loadSnapshot(ctx, fsys, dInf)
 	if err != nil {
 		return nil, fmt.Errorf("wal open snapshot: %w", err)
 	}
 	w.loadedASnapshot = snapshotOK
 
-	journalOK, err := w.playJournals(fsys, dInf, w.excludeLive)
+	journalOK, err := w.playJournals(ctx, fsys, dInf, w.excludeLive)
 	if err != nil {
 		return nil, fmt.Errorf("wal open journals: %w", err)
 	}
@@ -472,7 +473,7 @@ func (w *WAL) deprecateOldFiles(inf *dirInfo) error {
 	return nil
 }
 
-func (w *WAL) loadSnapshot(fsys fs.FS, inf *dirInfo) (bool, error) {
+func (w *WAL) loadSnapshot(ctx context.Context, fsys fs.FS, inf *dirInfo) (bool, error) {
 	snapshot, snapshotOK := inf.snapshotToLoad()
 	if !snapshotOK {
 		return false, nil
@@ -501,14 +502,14 @@ func (w *WAL) loadSnapshot(fsys fs.FS, inf *dirInfo) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("open wal snapshot next (%d): %w", idx, err)
 		}
-		if err := w.snapshotLoader.Load(b); err != nil {
+		if err := w.snapshotLoader.Load(ctx, b); err != nil {
 			return false, fmt.Errorf("open wal snapshot add (%d): %w", idx, err)
 		}
 	}
 	return true, nil
 }
 
-func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, error) {
+func (w *WAL) playJournals(ctx context.Context, fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, error) {
 	toPlay := inf.journalsToPlay()
 	if live, ok := inf.liveJournalToContinue(); !excludeLive && ok {
 		toPlay = append(toPlay, live)
@@ -562,7 +563,7 @@ func (w *WAL) playJournals(fsys fs.FS, inf *dirInfo, excludeLive bool) (bool, er
 				}
 			}
 			if w.journalPlayer != nil {
-				if err := w.journalPlayer.Play(b); err != nil {
+				if err := w.journalPlayer.Play(ctx, b); err != nil {
 					return false, fmt.Errorf("play journal: %w", err)
 				}
 			}
