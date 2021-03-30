@@ -115,6 +115,9 @@ func WithJournalPlayerFunc(f PlayerFunc) Option {
 // Default is DefaultMaxBytes.
 func WithMaxJournalBytes(m int64) Option {
 	return func(w *WAL) {
+		if m <= 0 {
+			return
+		}
 		w.maxJournalBytes = m
 	}
 }
@@ -123,6 +126,9 @@ func WithMaxJournalBytes(m int64) Option {
 // before it must be rotated.
 func WithMaxJournalIndices(m int) Option {
 	return func(w *WAL) {
+		if m <= 0 {
+			return
+		}
 		w.maxJournalIndices = m
 	}
 }
