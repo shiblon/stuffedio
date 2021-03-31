@@ -197,7 +197,7 @@ func (d *Decoder) Next() (uint64, []byte, error) {
 		}
 		if index != d.nextIndex {
 			// No result yet, index is wrong for what would otherwise be the next result.
-			return 0, nil, fmt.Errorf("wal next: expected index %d, got %d", d.nextIndex, index)
+			return 0, nil, fmt.Errorf("wal next: expected index %d, got %d: %w", d.nextIndex, index, recordio.CorruptRecord)
 		}
 
 		// No result yet. Check CRC, if it checks out, store in result and go
@@ -208,7 +208,7 @@ func (d *Decoder) Next() (uint64, []byte, error) {
 		if stored, computed := binary.LittleEndian.Uint32(buf[8:12]), crc32.Checksum(buf[12:], CRCTable); stored != computed {
 			result.idx = 0
 			result.val = nil
-			result.err = fmt.Errorf("wal next: crc mismatch on index %d", index)
+			result.err = fmt.Errorf("wal next: crc mismatch on index %d: %w", index, recordio.CorruptRecord)
 		} else {
 			result.idx = index
 			result.val = buf[12:]
