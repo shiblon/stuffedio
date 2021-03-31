@@ -594,8 +594,6 @@ func (w *WAL) playJournals(ctx context.Context, fsys fs.FS, inf *dirInfo, exclud
 func (w *WAL) Append(b []byte) (err error) {
 	defer un(lock(w))
 
-	log.Printf("APPEND: %q", b[:10])
-	defer log.Printf("APPEND RESULT: err=%v next=%v", err, w.nextIndex)
 	if !w.allowWrite {
 		return fmt.Errorf("wal append: not opened for appending, read-only")
 	}
@@ -603,11 +601,9 @@ func (w *WAL) Append(b []byte) (err error) {
 		return fmt.Errorf("wal append: no current journal encoder")
 	}
 	if w.timeToRotate() {
-		log.Printf("TIME TO ROTATE")
 		if err := w.rotate(); err != nil {
 			return fmt.Errorf("append rotate if ready: %v", err)
 		}
-		log.Printf("ROTATED")
 	}
 	n, err := w.currEncoder.Encode(w.nextIndex, b)
 	if err != nil {
