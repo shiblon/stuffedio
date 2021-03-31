@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"entrogo.com/stuffedio/orderedio"
 )
@@ -177,6 +178,8 @@ func WithExcludeLiveJournal(e bool) Option {
 // journals, setting up a writer for appending to journals and rotating them
 // when full, etc.
 type WAL struct {
+	sync.Mutex
+
 	dir               string
 	journalBase       string
 	snapshotBase      string
@@ -250,6 +253,15 @@ func (d *dirInfo) String() string {
 
 func (d *dirInfo) hasFiles() bool {
 	return len(d.oldSnapshots) != 0 || len(d.oldJournals) != 0 || len(d.partSnapshots) != 0 || len(d.snapshots) != 0 || len(d.journals) != 0 || len(d.liveJournals) != 0
+}
+
+func lock(l sync.Locker) sync.Locker {
+	l.Lock()
+	return l
+}
+
+func un(l sync.Locker) {
+	l.Unlock()
 }
 
 // Open opens a directory and loads the WAL found in it, then provides a WAL
@@ -579,7 +591,11 @@ func (w *WAL) playJournals(ctx context.Context, fsys fs.FS, inf *dirInfo, exclud
 }
 
 // Append sends another record to the journal, and can trigger rotation of underlying files.
-func (w *WAL) Append(b []byte) error {
+func (w *WAL) Append(b []byte) (err error) {
+	defer un(lock(w))
+
+	log.Printf("APPEND: %q", b[:10])
+	defer log.Printf("APPEND RESULT: err=%v next=%v", err, w.nextIndex)
 	if !w.allowWrite {
 		return fmt.Errorf("wal append: not opened for appending, read-only")
 	}
@@ -587,9 +603,11 @@ func (w *WAL) Append(b []byte) error {
 		return fmt.Errorf("wal append: no current journal encoder")
 	}
 	if w.timeToRotate() {
+		log.Printf("TIME TO ROTATE")
 		if err := w.rotate(); err != nil {
 			return fmt.Errorf("append rotate if ready: %v", err)
 		}
+		log.Printf("ROTATED")
 	}
 	n, err := w.currEncoder.Encode(w.nextIndex, b)
 	if err != nil {
@@ -603,6 +621,7 @@ func (w *WAL) Append(b []byte) error {
 
 // CurrIndex returns index number for the most recently read (or written) journal entry.
 func (w *WAL) CurrIndex() uint64 {
+	defer un(lock(w))
 	if w.nextIndex == 0 {
 		return 0
 	}
@@ -612,6 +631,7 @@ func (w *WAL) CurrIndex() uint64 {
 // Close cleans up any open resources. Live journals are left live, however,
 // for next time. To ensure that live journals get finalized, call Finalize.
 func (w *WAL) Close() error {
+	defer un(lock(w))
 	if w.currEncoder != nil {
 		err := w.currEncoder.Close()
 		w.currEncoder = nil
@@ -623,6 +643,7 @@ func (w *WAL) Close() error {
 // Finalize causes an open live journal to become final, so it will not be
 // appended to again. After completion, writes are disabled, but snapshots can be created.
 func (w *WAL) Finalize() error {
+	defer un(lock(w))
 	if !w.allowWrite {
 		return fmt.Errorf("wal finalize: can't finalize a read-only log")
 	}
