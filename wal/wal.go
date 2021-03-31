@@ -719,6 +719,44 @@ func CheckIndexName(name, base string, index uint64) error {
 	return nil
 }
 
+// OldFiles returns a list of old files that have been moved out of the way
+// (e.g., old journals after snapshotting).
+func OldFiles(dir string) ([]string, error) {
+	return filepath.Glob(filepath.Join(dir, OldPrefix+"*"))
+}
+
+// PartialFiles returns a list of partial files. Be careful using this to clean
+// up, as these might be actively written to. A partial snapshot can be deleted
+// after a successful snapshot, for example. Live journals are not considered
+// "partial".
+func PartialFiles(dir string) ([]string, error) {
+	return filepath.Glob(filepath.Join(dir, PartPrefix+"*"))
+}
+
+// Cleanup cleans old and partial files. Be careful not to use this in the
+// middle of a snapshot.
+func Cleanup(dir string) error {
+	ofs, err := OldFiles(dir)
+	if err != nil {
+		return fmt.Errorf("wal cleanup: %w", err)
+	}
+	pfs, err := PartialFiles(dir)
+	if err != nil {
+		return fmt.Errorf("wal cleanup: %w", err)
+	}
+	for _, name := range ofs {
+		if err := os.Remove(name); err != nil {
+			return fmt.Errorf("wal cleanup: %w", err)
+		}
+	}
+	for _, name := range pfs {
+		if err := os.Remove(name); err != nil {
+			return fmt.Errorf("wal cleanup: %w", err)
+		}
+	}
+	return nil
+}
+
 // ParseIndexName pulls the index from a file name. Should not have path components.
 func ParseIndexName(name string) (*FileMeta, error) {
 	isOld := strings.HasPrefix(name, OldPrefix)
