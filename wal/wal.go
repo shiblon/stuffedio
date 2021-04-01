@@ -814,6 +814,18 @@ func (w *WAL) CanSnapshot() bool {
 	return w.CheckCanSnapshot() == nil
 }
 
+// SnapshotUseful indicates whether a not-live journal was loaded (non-live),
+// e.g., after a snapshot file, or before a snapshot has been taken. Check this
+// to determine whether taking a snapshot makes any sense from a "did we read
+// anything new" perspective.
+//
+// This only makes sense on load - it wouldn't be used on a live system that
+// has live information in its memory, only on a system that excludes live
+// journals. Returns false in any case where it makes not sense to snapshot.
+func (w *WAL) SnapshotUseful() bool {
+	return w.CanSnapshot() && w.loadedAJournal
+}
+
 // CheckCanSnapshot indicates whether a snapshot can be taken, returning a
 // non-nil error with an appropriate message if not. In
 // particular, if no journals have been loaded, either because the last thing

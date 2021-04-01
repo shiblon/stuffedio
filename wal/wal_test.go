@@ -39,6 +39,7 @@ func TestWAL_Snapshots(t *testing.T) {
 	func() {
 		// Get started.
 		w, err := Open(ctx, dir, WithRequireEmpty(true))
+		// Try a snapshot right away, seed with initial values.
 		snapName, err := w.CreateSnapshot(func(a ValueAdder) error {
 			for _, v := range initialValues {
 				if err := a.AddValue([]byte(v)); err != nil {
@@ -47,11 +48,11 @@ func TestWAL_Snapshots(t *testing.T) {
 			}
 			return nil
 		})
-		if want, got := "0000000000000001-snapshot-final", filepath.Base(snapName); got != want {
-			t.Fatalf("WAL snapshot: expected name %q, got %q", want, got)
-		}
 		if err != nil {
 			t.Fatalf("WAL snapshot adder: %v", err)
+		}
+		if want, got := "0000000000000001-snapshot-final", filepath.Base(snapName); got != want {
+			t.Fatalf("WAL snapshot: expected name %q, got %q", want, got)
 		}
 	}()
 
