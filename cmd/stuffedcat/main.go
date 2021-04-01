@@ -64,7 +64,7 @@ func main() {
 	}
 
 	for _, fname := range flag.Args() {
-		fmt.Printf("%q\n", fname)
+		fmt.Printf(`{"FILE": %q}`+"\n", fname)
 		if err := catFile(fname); err != nil {
 			log.Printf("Error: %v", err)
 		}
