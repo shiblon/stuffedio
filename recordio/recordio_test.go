@@ -52,7 +52,7 @@ func ExampleDecoder_SkipPartial() {
 	for !dec.Done() {
 		b, err := dec.Next()
 		if err != nil {
-			log.Fatalf("Error reading: %v", err)
+			log.Fatalf("Error reading after partial skip: %v", err)
 		}
 		fmt.Printf("%q\n", string(b))
 	}
@@ -493,4 +493,17 @@ func ExampleReverseDecoder() {
 	// "Message 3"
 	// "Message 2"
 	// "Message 1"
+}
+
+func TestDecoder_empty(t *testing.T) {
+	buf := new(bytes.Buffer)
+	d := NewDecoder(buf)
+
+	if !d.Done() {
+		t.Fatalf("Empty buffer with new decoder: not done when initiall expected")
+	}
+
+	if _, err := d.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("Empty buffer with new decoder: next should return EOF, but doesn't")
+	}
 }

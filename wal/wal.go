@@ -880,7 +880,9 @@ func (w *WAL) CreateSnapshot(s Snapshotter) (string, error) {
 	if err := w.CheckCanSnapshot(); err != nil {
 		return "", fmt.Errorf("wal snapshot: %w", err)
 	}
-	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex))
+	// Remember, we are working with the *last index*, not the next one, for
+	// snapshot files. This way they always sort properly.
+	liveName := filepath.Join(w.dir, IndexName(w.snapshotBase, w.nextIndex-1))
 	f, err := os.OpenFile(liveName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return "", fmt.Errorf("create snapshot: %w", err)

@@ -138,7 +138,7 @@ import (
 )
 
 var (
-	reserved = []byte{0xfe, 0xfd}
+	Reserved = []byte{0xfe, 0xfd}
 )
 
 const (
@@ -169,21 +169,21 @@ func NewEncoder(dest io.Writer) *Encoder {
 }
 
 func isDelimiter(b []byte, pos int) bool {
-	if pos > len(b)-len(reserved) {
+	if pos > len(b)-len(Reserved) {
 		return false
 	}
-	return bytes.Equal(b[pos:pos+len(reserved)], reserved)
+	return bytes.Equal(b[pos:pos+len(Reserved)], Reserved)
 }
 
 func findReserved(p []byte, end int) (int, bool) {
 	if end > len(p) {
 		end = len(p)
 	}
-	if end < len(reserved) {
+	if end < len(Reserved) {
 		return end, false
 	}
 	// Check up to the penultimate position (two-byte check).
-	for i := 0; i < end-len(reserved)+1; i++ {
+	for i := 0; i < end-len(Reserved)+1; i++ {
 		if isDelimiter(p, i) {
 			return i, true
 		}
@@ -200,7 +200,7 @@ func (e *Encoder) Encode(p []byte) (int, error) {
 	}
 
 	// Always start with the delimiter.
-	buf := bytes.NewBuffer(reserved)
+	buf := bytes.NewBuffer(Reserved)
 
 	// First block is small, try to find the reserved sequence in the first smallLimit bytes.
 	// Format that block as |reserved 0|reserved 1|length|actual bytes...|.
@@ -217,7 +217,7 @@ func (e *Encoder) Encode(p []byte) (int, error) {
 	// Set the starting point for the next rounds. If we found a delimiter, we
 	// need to advance past it first.
 	if foundReserved {
-		end += len(reserved)
+		end += len(Reserved)
 	}
 
 	// The next blocks are larger, up to largeLimit bytes each. Find the
@@ -237,7 +237,7 @@ func (e *Encoder) Encode(p []byte) (int, error) {
 		}
 
 		if foundReserved {
-			end += len(reserved)
+			end += len(Reserved)
 		}
 		p = p[end:]
 	}
@@ -273,6 +273,8 @@ type Decoder struct {
 	pos      int   // position in the unused read buffer.
 	end      int   // one past the end of unused data.
 	ended    bool  // EOF reached, don't read again.
+	started  bool  // A read has been performed.
+	firstErr error
 }
 
 // NewDecoder creates an Decoder from the given src, which is assumed to be
@@ -287,6 +289,7 @@ func NewDecoder(src io.Reader) *Decoder {
 // fillBuf ensures that the internal buffer is at least half full, which is
 // enough space for one short read and one long read.
 func (d *Decoder) fillBuf() error {
+	d.started = true
 	if d.ended {
 		return nil // just use pos/end, no more reading.
 	}
@@ -342,11 +345,11 @@ func (d *Decoder) Consumed() int64 {
 
 // discardLeader advances the position of the buffer, only if it contains a leading delimiter.
 func (d *Decoder) discardLeader() bool {
-	if d.end-d.pos < len(reserved) {
+	if d.end-d.pos < len(Reserved) {
 		return false
 	}
-	if bytes.Equal(reserved, d.bufData()[:len(reserved)]) {
-		d.advance(len(reserved))
+	if bytes.Equal(Reserved, d.bufData()[:len(Reserved)]) {
+		d.advance(len(Reserved))
 		return true
 	}
 	return false
@@ -358,6 +361,11 @@ func (d *Decoder) atDelimiter() bool {
 
 // Done indicates whether the underlying stream is exhausted and all records are returned.
 func (d *Decoder) Done() bool {
+	if !d.started {
+		// Attempt to fill the buffer, keep error around in case it's needed for Next.
+		d.firstErr = d.fillBuf()
+		// Now the test below should be meaningful on initial attempt.
+	}
 	return d.end == d.pos && d.ended
 }
 
@@ -426,6 +434,13 @@ func (d *Decoder) SkipPartial() error {
 // record to begin with a delimiter. Returns a wrapped io.EOF when complete.
 // More idiomatically, check Done after every iteration.
 func (d *Decoder) Next() ([]byte, error) {
+	// We might have gotten an error when trying to determine the first value
+	// for Done. It would have been stored, so we return that lookahead error
+	// immediately if non-nil.
+	if err := d.firstErr; err != nil {
+		d.firstErr = nil
+		return nil, fmt.Errorf("next (first): %w", err)
+	}
 	buf := new(bytes.Buffer)
 	if err := d.fillBuf(); err != nil {
 		return nil, fmt.Errorf("next: %w", err)
@@ -480,7 +495,7 @@ func (d *Decoder) Next() ([]byte, error) {
 	}
 	if smallSize != smallLimit {
 		// Implied delimiter in the data itself. Write the reserved word.
-		if _, err := buf.Write(reserved); err != nil {
+		if _, err := buf.Write(Reserved); err != nil {
 			return nil, fmt.Errorf("next: %w", err)
 		}
 	}
@@ -513,7 +528,7 @@ func (d *Decoder) Next() ([]byte, error) {
 		}
 		if size != largeLimit {
 			// Implied delimiter in the data itself, append.
-			if _, err := buf.Write(reserved); err != nil {
+			if _, err := buf.Write(Reserved); err != nil {
 				return nil, fmt.Errorf("next: %w", err)
 			}
 		}
@@ -531,7 +546,7 @@ func (d *Decoder) Next() ([]byte, error) {
 	// implicit delimiter bytes.
 	end := buf.Len()
 	if !lastIsFull {
-		end -= len(reserved)
+		end -= len(Reserved)
 	}
 	return buf.Bytes()[:end], nil
 }
@@ -573,7 +588,7 @@ func (d *ReverseDecoder) Next() ([]byte, error) {
 	}
 	end := d.pos
 	start := end
-	for end >= int64(len(reserved)) {
+	for end >= int64(len(Reserved)) {
 		off := end - 1<<17
 		if off < 0 {
 			off = 0
@@ -598,10 +613,10 @@ func (d *ReverseDecoder) Next() ([]byte, error) {
 			break
 		}
 
-		end -= int64(len(buf) - len(reserved) + 1)
+		end -= int64(len(buf) - len(Reserved) + 1)
 	}
 
-	if end < int64(len(reserved)) {
+	if end < int64(len(Reserved)) {
 		d.pos = 0 // can't get another record, make Done return true.
 		return nil, fmt.Errorf("reverse unstuff, missing leading delimiter: %w", CorruptRecord)
 	}

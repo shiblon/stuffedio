@@ -51,7 +51,10 @@ func TestWAL_Snapshots(t *testing.T) {
 		if err != nil {
 			t.Fatalf("WAL snapshot adder: %v", err)
 		}
-		if want, got := "0000000000000001-snapshot-final", filepath.Base(snapName); got != want {
+		// All zeros on initial snapshots with no previous journals. Last index
+		// seen is not a valid journal index, it's *right before* a valid
+		// journal index.
+		if want, got := "0000000000000000-snapshot-final", filepath.Base(snapName); got != want {
 			t.Fatalf("WAL snapshot: expected name %q, got %q", want, got)
 		}
 	}()
@@ -87,8 +90,8 @@ func TestWAL_Snapshots(t *testing.T) {
 	}()
 
 	expectNames := []string{
-		"0000000000000001-snapshot-final",
-		"0000000000000002-journal",
+		"0000000000000000-snapshot-final",
+		"0000000000000001-journal",
 	}
 	ds, err := fs.ReadDir(os.DirFS(dir), ".")
 	if err != nil {
