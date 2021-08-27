@@ -7,8 +7,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"entrogo.com/stuffedio/recordio"
 	"github.com/google/go-cmp/cmp"
+	"github.com/shiblon/stuffedio/recordio"
 )
 
 func ExampleReadWrite() {

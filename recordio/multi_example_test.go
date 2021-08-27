@@ -6,7 +6,7 @@ import (
 	"log"
 	"testing/fstest"
 
-	"entrogo.com/stuffedio/recordio"
+	"github.com/shiblon/stuffedio/recordio"
 )
 
 const prefix = "journal"

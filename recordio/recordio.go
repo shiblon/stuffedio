@@ -129,7 +129,7 @@
 // readers (effectively concatenating them), there is a MultiDecoder
 // implementation contained here. There is also a handy file iterator that can
 // be used to provide on-demand file opening for the MultiDecoder.
-package recordio // import "entrogo.com/stuffedio/recordio"
+package recordio
 
 import (
 	"bytes"

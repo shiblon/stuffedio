@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"entrogo.com/stuffedio/orderedio"
+	"github.com/shiblon/stuffedio/orderedio"
 )
 
 const (

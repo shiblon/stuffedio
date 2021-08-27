@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"entrogo.com/stuffedio/wal"
+	"github.com/shiblon/stuffedio/wal"
 )
 
 func appendToWAL(ctx context.Context, dir string, values []string, finalize bool) error {

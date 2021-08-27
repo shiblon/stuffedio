@@ -9,8 +9,8 @@ import (
 	"log"
 	"os"
 
-	"entrogo.com/stuffedio/orderedio"
-	"entrogo.com/stuffedio/recordio"
+	"github.com/shiblon/stuffedio/orderedio"
+	"github.com/shiblon/stuffedio/recordio"
 )
 
 func catRecords(r io.Reader) error {

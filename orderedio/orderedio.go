@@ -56,7 +56,7 @@
 //	// 2: "This is another message"
 //	// 3: "And here's a third"
 //
-package orderedio // import "entrogo.com/stuffedio/orderedio"
+package orderedio
 
 import (
 	"encoding/binary"
@@ -64,7 +64,7 @@ import (
 	"hash/crc32"
 	"io"
 
-	"entrogo.com/stuffedio/recordio"
+	"github.com/shiblon/stuffedio/recordio"
 )
 
 var CRCTable = crc32.MakeTable(crc32.Koopman)

@@ -1,4 +1,4 @@
-module entrogo.com/stuffedio
+module github.com/shiblon/stuffedio
 
 go 1.16
 
