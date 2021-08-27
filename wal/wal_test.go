@@ -174,6 +174,54 @@ func TestWAL_ReadOnly(t *testing.T) {
 	}
 }
 
+func TestWAL_EmptyJournal(t *testing.T) {
+	ctx := context.Background()
+
+	dir, cleanup := mustTempDir(t)
+	defer cleanup()
+
+	// Start the WAL and close it without writing anything.
+	// Creates an empty initial journal file.
+	if err := func() error {
+		w, err := Open(ctx, dir, WithAllowWrite(true))
+		if err != nil {
+			return fmt.Errorf("create empty WAL: %w", err)
+		}
+		defer w.Close()
+		return nil
+	}(); err != nil {
+		t.Fatalf("Error creating empty WAL: %v", err)
+	}
+
+	var gotNames []string
+	ds, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("Read dir: %v", err)
+	}
+	for _, de := range ds {
+		gotNames = append(gotNames, de.Name())
+	}
+	if diff := cmp.Diff([]string{"0000000000000001-journal"}, gotNames); diff != "" {
+		t.Fatalf("Unexpected diff in dir names (-want +got):\n%v", diff)
+	}
+
+	// Open WAL again, try to send something to it. Should succeed with index 1.
+	w, err := Open(ctx, dir,
+		WithAllowWrite(true),
+		WithJournalPlayerFunc(func(_ context.Context, b []byte) error {
+			return fmt.Errorf("player func got a record, but should have been empty: %s", b)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Open empty WAL: %v", err)
+	}
+	defer w.Close()
+
+	if err := w.Append([]byte("hello")); err != nil {
+		t.Fatalf("Error appending to previously empty journal: %v", err)
+	}
+}
+
 func TestWAL_JournalOnly(t *testing.T) {
 	ctx := context.Background()
 

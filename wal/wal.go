@@ -586,6 +586,13 @@ func (w *WAL) playJournals(ctx context.Context, fsys fs.FS, inf *dirInfo, exclud
 				}
 			}
 		}
+
+	}
+	if w.nextIndex == 0 || w.currCount == 0 {
+		// Didn't read any records, so journal is not OK, but it's not an error.
+		// We can get an empty journal file if we create one, then die, then
+		// reload without ever writing anything to it.
+		return false, nil
 	}
 	return true, nil
 }
