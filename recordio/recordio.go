@@ -295,7 +295,6 @@ func (d *Decoder) fillBuf() error {
 	}
 	if d.end-d.pos >= len(d.buf)/2 {
 		// Don't bother filling if it's at least half full.
-		// The buffer is designed to
 		return nil
 	}
 	// Room to move, shift left.
@@ -378,7 +377,7 @@ func (d *Decoder) Close() error {
 }
 
 // scanN returns at most the next n bytes, fewer if it hits the end or a delimiter.
-// It conumes them from the buffer. It does not read from the source: ensure
+// It consumes them from the buffer. It does not read from the source: ensure
 // that the buffer is full enough to proceed before calling. It can only go up
 // to the penultimate byte, to ensure that it doesn't read half a delimiter.
 func (d *Decoder) scanN(n int) []byte {
