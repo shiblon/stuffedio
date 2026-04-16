@@ -13,7 +13,7 @@
 // reads, those checksums are checked.
 //
 // Repeated indices are allowed, with only the first valid record for that
-// indices being returned on read.
+// index being returned on read.
 //
 // The first record's index must be 1 or higher. Options allow a specific
 // starting index to be enforced (e.g., when the file name indicates the
