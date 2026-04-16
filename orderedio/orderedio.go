@@ -174,6 +174,9 @@ func (d *Decoder) Next() (uint64, []byte, error) {
 		if err != nil {
 			return 0, nil, fmt.Errorf("wal next: %w", err)
 		}
+		if len(buf) < 12 {
+			return 0, nil, fmt.Errorf("wal next: record too short (%d bytes): %w", len(buf), recordio.CorruptRecord)
+		}
 		index := binary.LittleEndian.Uint64(buf[0:8])
 		// Allow any next index if it's 0 (permissive initial condition).
 		if d.nextIndex == 0 {

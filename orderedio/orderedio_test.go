@@ -2,6 +2,7 @@ package orderedio
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -11,7 +12,7 @@ import (
 	"github.com/shiblon/stuffedio/recordio"
 )
 
-func ExampleReadWrite() {
+func Example() {
 	buf := new(bytes.Buffer)
 	e := NewStreamEncoder(buf)
 
@@ -237,4 +238,31 @@ func TestOrdered_descending(t *testing.T) {
 			nextIdx--
 		}
 	}
+}
+
+// TestOrdered_rejectsPlainRecordio verifies that feeding plain recordio data
+// to an ordered decoder returns CorruptRecord rather than panicking. Before the
+// short-buffer guard was added to Decoder.Next, this test would panic because
+// a short plain record caused an out-of-bounds slice on the index header bytes.
+func TestOrdered_rejectsPlainRecordio(t *testing.T) {
+	var buf bytes.Buffer
+	enc := recordio.NewEncoder(&buf)
+	for _, s := range []string{"one", "two", "three"} {
+		if _, err := enc.Encode([]byte(s)); err != nil {
+			t.Fatalf("plain encode: %v", err)
+		}
+	}
+	enc.Close()
+
+	d := NewStreamDecoder(&buf)
+	for !d.Done() {
+		_, _, err := d.Next()
+		if err != nil {
+			if !errors.Is(err, recordio.CorruptRecord) {
+				t.Errorf("want CorruptRecord, got: %v", err)
+			}
+			return
+		}
+	}
+	t.Error("expected CorruptRecord error reading plain recordio as ordered, got none")
 }
